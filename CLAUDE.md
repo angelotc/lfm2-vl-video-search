@@ -4,112 +4,183 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Node.js + TypeScript project using `node-llama-cpp` to run local LLM inference with the LiquidAI LFM2-VL-1.6B vision-language model. The project demonstrates chat sessions with streaming responses, JSON schema validation, and structured output parsing.
+This is a Python-based semantic video search system using LiquidAI's LFM2-VL-1.6B vision-language model. The project processes videos frame-by-frame, generates semantic descriptions using the VLM, and enables semantic search capabilities across video content.
 
 ## Development Commands
 
-### Initial Setup
+### Environment Setup
 ```bash
-npm install  # Downloads dependencies and pulls model files automatically via postinstall hook
+python -m venv myenv
+myenv\Scripts\activate  # On Windows
+source myenv/bin/activate  # On Linux/Mac
+pip install -r requirements.txt
 ```
 
-The `postinstall` script automatically downloads the model file `hf:LiquidAI/LFM2-VL-1.6B-GGUF` to the `./models` directory.
-
-### Running the Project
+### Running the Applications
 ```bash
-npm start  # Runs src/index.ts directly via vite-node (no build required)
-npm run start:build  # Runs the compiled version from dist/
+streamlit run app.py   # Basic video upload UI (no AI processing)
+streamlit run main.py  # Full video frame analyzer with LFM2-VL model
 ```
 
-### Building
-```bash
-npm run build  # Compiles TypeScript to dist/ (prebuild script cleans output first)
-```
+Both apps will open in the browser at `http://localhost:8501`
 
-### Linting and Formatting
+### Required Dependencies
+The current `requirements.txt` is incomplete. Full dependencies needed:
 ```bash
-npm run lint  # Runs ESLint with all configured rules
-npm run format  # Auto-fixes ESLint issues where possible
-```
-
-### Cleaning
-```bash
-npm run clean  # Removes node_modules, dist, tsconfig.tsbuildinfo, and models
-```
-
-### Model Management
-```bash
-npm run models:pull  # Manually re-download model files to ./models
+pip install streamlit transformers torch opencv-python pillow accelerate
 ```
 
 ## Architecture
 
 ### Project Structure
-- **`src/index.ts`**: Single entry point containing the complete application logic
-- **`models/`**: Downloaded GGUF model files (gitignored, auto-downloaded)
-- **`dist/`**: Compiled JavaScript output (gitignored)
+- **`app.py`**: Simple video upload and preview UI (no AI processing)
+  - File uploader supporting MP4, AVI, MOV, MKV, WMV, FLV, WebM
+  - Video preview and metadata display
+  - Save videos to `uploads/` directory
 
-### Core Application Flow (src/index.ts)
-1. **Model Loading**: Resolves and loads the LFM2-VL-1.6B model from the models directory
-2. **Context Creation**: Creates a context with max 8096 tokens
-3. **Chat Session**: Demonstrates three types of interactions:
-   - Streaming response with segment information (chain of thought)
-   - Simple follow-up question using conversation history
-   - Structured JSON output using grammar-constrained generation
+- **`main.py`**: Core semantic video processing application
+  - Frame extraction at 1 FPS intervals
+  - VLM-based frame description generation
+  - JSON output with frame-level annotations
+  - Progress tracking and visualization
 
-### Key Dependencies
-- **`node-llama-cpp`**: Core library for running LLAMA models locally
-  - `getLlama()`: Initializes the LLAMA runtime
-  - `resolveModelFile()`: Locates model files in the models directory
-  - `LlamaChatSession`: Manages conversation context and history
-  - Grammar API: Forces responses to match JSON schemas
-- **`chalk`**: Terminal color output for better UX
-- **`vite-node`**: Fast TypeScript execution without pre-compilation
+- **`uploads/`**: Directory for saved uploaded videos (auto-created)
 
-### Response Streaming
-The codebase demonstrates two streaming patterns:
-- **Simple streaming** (`onTextChunk`): Plain text chunks (commented out in example)
-- **Segment streaming** (`onResponseChunk`): Includes metadata about reasoning segments (e.g., chain of thought markers)
+- **`video_frames_analysis/`**: Output directory for analysis results (auto-created)
 
-### Grammar-Constrained Generation
-The project shows how to force structured JSON responses:
-```typescript
-const responseGrammar = await llama.createGrammarForJsonSchema({...schema...});
-const response = await session.prompt(question, {grammar: responseGrammar});
-const parsed = responseGrammar.parse(response);
+### Core Processing Flow (main.py)
+
+1. **Video Upload**: User uploads video via Streamlit file uploader
+2. **Performance Configuration**: User sets batch size and worker threads
+   - Batch size: 1-16 frames per batch (default: 4)
+   - Worker threads: 1-4 parallel workers (default: 2)
+3. **Model Loading**: Cached loading of LFM2-VL model
+   - Model: `LiquidAI/LFM2-VL-450M` from HuggingFace (configurable)
+   - Device: CPU with float16 precision
+   - Manual device management (no device_map="auto")
+4. **Frame Extraction** (Phase 1):
+   - Extract frames at fixed interval (every 30 frames) using OpenCV
+   - Convert BGR to RGB for model compatibility
+   - Store all frames in memory before processing
+5. **Parallel VLM Processing** (Phase 2):
+   - Split frames into batches
+   - Process batches in parallel using ThreadPoolExecutor
+   - Each worker processes one batch at a time
+   - Apply chat template with image + text prompt
+   - Prompt: "Describe this frame in 10 words or less using keywords only."
+   - Generate description with max 128 new tokens
+6. **Output Generation**:
+   - Sort results by frame number
+   - Save results to `video_frames_analysis/video_analysis.json`
+   - Format: `{video_name, total_frames, frames: [{frame_number, text}]}`
+   - Display results in-app and provide JSON download
+
+### Key Components
+
+**Model Loading (`@st.cache_resource`)**
+- Caches model and processor across reruns for performance
+- Uses `AutoModelForImageTextToText` and `AutoProcessor` from transformers
+- Automatic device detection (CUDA if available, otherwise CPU)
+- Uses float16 on GPU for efficiency, float32 on CPU for compatibility
+- Avoids `device_map="auto"` to prevent meta device errors
+
+**Frame Extraction (`extract_frames`)**
+- Separated extraction phase for better performance
+- Opens video with OpenCV (`cv2.VideoCapture`)
+- Extracts FPS and total frame count
+- Samples frames at fixed interval (configurable, default every 30 frames)
+- Stores all frames in memory as PIL Images before processing
+
+**Parallel Processing (`process_video` + `process_frame_batch`)**
+- Uses `ThreadPoolExecutor` for concurrent batch processing
+- Frames split into configurable batches (default: 4 frames/batch)
+- Multiple workers process batches in parallel (default: 2 workers)
+- Progress tracking updates as batches complete
+- Results sorted by frame number after all processing completes
+- Converts each frame to PIL Image for model input
+
+**Conversation Template**
+- Uses vision-language chat format with role-based messages
+- Each frame analyzed independently (no cross-frame context)
+- Text prompt designed for concise keyword extraction
+
+**Output Format**
+```json
+{
+  "video_name": "example.mp4",
+  "total_frames": 120,
+  "frames": [
+    {"frame_number": 1, "text": "person walking, outdoor scene, daytime"},
+    {"frame_number": 2, "text": "building, street, cars parked"}
+  ]
+}
 ```
 
-## TypeScript Configuration
+## Important Implementation Details
 
-- **Target/Module**: ES2022 with ESM modules
-- **Strict Mode**: Enabled with additional strict checks (noImplicitAny, noImplicitReturns, etc.)
-- **Output**: Compiled to `dist/` with source maps and type declarations
-- **Entry Point**: Only `src/index.ts` is explicitly included
+### Frame Sampling Strategy
+- Current: Every 30 frames (`frame_interval = 30` in main.py:108)
+- For 30fps video: ~1 frame per second
+- For 60fps video: ~2 frames per second
+- Adjustable by modifying `frame_interval` in `extract_frames()` call
+- Trade-off: Higher sampling = more detail but slower processing
 
-## ESLint Configuration
+### Parallel Processing Performance
+- **Batch size**: Controls memory usage and GPU utilization
+  - Smaller batches (1-2): Lower memory, more overhead
+  - Larger batches (8-16): Higher memory, better throughput (if GPU available)
+  - Default (4): Good balance for CPU processing
+- **Worker threads**: Controls parallelism
+  - CPU-only: Limited benefit beyond 2-3 workers (GIL + model serialization)
+  - GPU: Can benefit from more workers if VRAM allows
+  - Default (2): Conservative setting for CPU
+- **Expected speedup**: 1.5-2x on CPU with 2 workers, depends on batch size and model
 
-The project uses a comprehensive ESLint setup with:
-- **Stylistic rules**: 4-space indentation, double quotes, semicolons required, no object curly spacing
-- **Import ordering**: Enforced with specific group ordering (builtin → external → internal → parent → sibling)
-- **File extensions**: Must use `.js` extension in imports (n/file-extension-in-import)
-- **TypeScript-specific**: Member ordering (fields → constructor → methods), explicit accessibility modifiers
-- **JSDoc**: Recommended rules with some relaxation (descriptions not required)
+### Model Prompt Engineering
+- Current prompt focuses on keyword extraction (10 words or less)
+- Located in line 69 of main.py
+- Can be customized for different use cases:
+  - Detailed descriptions: "Describe this frame in detail"
+  - Object detection: "List all objects visible in this frame"
+  - Scene classification: "Classify the scene type"
 
-**Ignored directories**: `dist/`, `models/`
+### Performance Considerations
+- **First run**: Model download from HuggingFace (~3.2GB)
+- **GPU recommended**: Processing 1 frame/second video can take significant time on CPU
+- **Memory usage**: Model requires ~4GB RAM minimum (more on CPU)
+- **Caching**: Streamlit caches model between reruns but not between sessions
+- **Device handling**: Automatically uses GPU (CUDA) if available, falls back to CPU with float32
 
-## Code Style Notes
+## Extension Points for Semantic Search
 
-- **Indentation**: 4 spaces (not tabs)
-- **Quotes**: Double quotes preferred
-- **Object spacing**: No spaces inside braces `{like: this}`
-- **Brace style**: 1tbs (opening brace on same line)
-- **Max line length**: 140 characters
-- **Member accessibility**: Must explicitly declare `public`/`private`/`protected` on class members
-- **Type literal delimiters**: Use commas, not semicolons (e.g., `{foo: string, bar: number}`)
+To build a complete semantic search system, the following components are needed:
 
-## Important Notes
+### 1. Embedding Generation
+- Replace keyword descriptions with vector embeddings
+- Use VLM's hidden states or separate embedding model (e.g., CLIP)
+- Store frame embeddings in vector database
 
-- Model files are large (>2GB) and downloaded automatically on `npm install`
-- The project requires Node.js >=20.0.0
-- ESM modules are required (`"type": "module"` in package.json)
-- Development uses `vite-node` for fast iteration without build step
+### 2. Vector Storage
+- ChromaDB, Pinecone, or FAISS for similarity search
+- Index: video_id + frame_number + embedding vector
+- Metadata: timestamp, video_name, original text description
+
+### 3. Search Interface
+- Text-to-frame: Encode search query → find nearest embeddings
+- Frame-to-frame: Upload reference image → find similar frames
+- Temporal search: Find sequences matching criteria
+
+### 4. Result Presentation
+- Display matching frames with timestamps
+- Generate video clips around matches
+- Relevance scoring and ranking
+
+## Current Limitations
+
+- **No semantic search implemented**: Only generates descriptions, no search capability
+- **No embeddings**: Text descriptions are not vectorized
+- **No indexing**: Results stored as flat JSON files
+- **No cross-frame context**: Each frame analyzed independently
+- **Fixed prompting**: Single hardcoded prompt for all frames
+- **No batch processing**: Videos processed sequentially, one at a time
+- **Incomplete requirements.txt**: Missing several critical dependencies

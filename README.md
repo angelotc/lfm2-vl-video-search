@@ -1,15 +1,60 @@
-# Node + TypeScript + `node-llama-cpp`
-This template provides a minimal setup to get Node working with TypeScript and `node-llama-cpp`, and some ESLint rules.
+# Video Upload Streamlit App
 
-## Get started
-Install node modules and download the model files used by `node-llama-cpp`:
+A simple Streamlit application for uploading and previewing video files.
+
+## Features
+
+- Upload video files in multiple formats (MP4, AVI, MOV, MKV, WMV, FLV, WebM)
+- Preview uploaded videos directly in the browser
+- Display video file information (name, size, type)
+- Save uploaded videos to disk
+- Clean and intuitive user interface
+
+## Installation
+
+1. Create a virtual environment (recommended):
 ```bash
-npm install
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
-Start the project:
+2. Install dependencies:
 ```bash
-npm start
+pip install -r requirements.txt
 ```
 
-> Generated using `npm create node-llama-cpp@latest` ([learn more](https://node-llama-cpp.withcat.ai/guide/))
+## Usage
+
+Run the Streamlit app:
+```bash
+streamlit run app.py
+```
+
+The app will open in your default web browser at `http://localhost:8501`
+
+## How to Use
+
+1. Click on "Browse files" or drag and drop a video file
+2. Preview the video in the browser
+3. View video information (filename, size, type)
+4. Optionally save the video to the `uploads/` directory
+
+## Supported Video Formats
+
+- MP4
+- AVI
+- MOV
+- MKV
+- WMV
+- FLV
+- WebM
+
+## Project Structure
+
+```
+.
+├── app.py              # Main Streamlit application
+├── requirements.txt    # Python dependencies
+├── uploads/           # Directory for saved videos (created automatically)
+└── README.md          # This file
+```
