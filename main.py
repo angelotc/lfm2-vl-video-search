@@ -51,9 +51,10 @@ def download_youtube_video(url, output_path=None):
         st.error(f"Error downloading video: {str(e)}")
         return None, None
 
-def process_video(video_path, model, processor):
-    """Process video and extract frame descriptions"""
+def process_video(video_path, model, processor, smart_filtering=True):
+    """Process video and extract frame descriptions with intelligent VLM-based filtering"""
     all_frames = []
+    skipped_count = 0
     
     # Open the video
     cap = cv2.VideoCapture(video_path)
@@ -67,6 +68,8 @@ def process_video(video_path, model, processor):
     frame_interval = int(fps)  # Extract one frame per second
     
     st.info(f"📹 FPS: {fps:.2f}, extracting 1 frame per second")
+    if smart_filtering:
+        st.info(f"🧠 Smart filtering enabled - VLM checks for changes")
     
     frame_count = 0
     second_count = 0
@@ -96,100 +99,229 @@ def process_video(video_path, model, processor):
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             image = Image.fromarray(frame_rgb)
             
-            # Updated robust prompt for different types of videos
-            conversation = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": image},
-                        {"type": "text", "text": "What are the key important elements you see in this frame? Describe any text, objects, people, actions, or educational content present. Use keywords and brief descriptions."},
-                    ],
-                },
-            ]
-            
-            # Generate description
-            inputs = processor.apply_chat_template(
-                conversation,
-                add_generation_prompt=True,
-                return_tensors="pt",
-                return_dict=True,
-                tokenize=True,
-            ).to(model.device)
-            
-            outputs = model.generate(**inputs, max_new_tokens=128)
-            description = processor.batch_decode(outputs, skip_special_tokens=True)[0]
-            
-            # Add to results with timestamp
-            all_frames.append({
-                "frame_number": second_count,
-                "timestamp_seconds": round(timestamp, 2),
-                "timestamp_formatted": f"{int(timestamp // 60):02d}:{int(timestamp % 60):02d}",
-                "description": description
-            })
+            # For first 5 frames, always add them
+            if len(all_frames) < 5:
+                # Standard description prompt
+                conversation = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "image": image},
+                            {"type": "text", "text": "Describe what you see in this frame. Focus on: 1) Any text, numbers, equations, or mathematical expressions. 2) Any solutions, answers, or calculations. 3) Key objects or content. Be specific."},
+                        ],
+                    },
+                ]
+                
+                inputs = processor.apply_chat_template(
+                    conversation,
+                    add_generation_prompt=True,
+                    return_tensors="pt",
+                    return_dict=True,
+                    tokenize=True,
+                ).to(model.device)
+                
+                # Get input length to skip it later
+                input_length = inputs['input_ids'].shape[1]
+                
+                outputs = model.generate(
+                    **inputs, 
+                    max_new_tokens=150,
+                    do_sample=True,
+                    temperature=0.5
+                )
+                
+                # Decode only the NEW tokens (skip input)
+                new_tokens = outputs[0][input_length:]
+                description = processor.decode(new_tokens, skip_special_tokens=True).strip()
+                
+                # Add to results
+                all_frames.append({
+                    "frame_number": second_count,
+                    "timestamp_seconds": round(timestamp, 2),
+                    "timestamp_formatted": f"{int(timestamp // 60):02d}:{int(timestamp % 60):02d}",
+                    "description": description
+                })
+                
+                status_text.text(f"✓ Frame {second_count} added (building baseline)")
+                
+            else:
+                # From frame 6 onwards: Check if different from previous 5
+                if smart_filtering:
+                    # Get last 5 frames context - use shorter snippets
+                    previous_context = ""
+                    for prev_frame in all_frames[-5:]:
+                        previous_context += f"Frame {prev_frame['frame_number']}: {prev_frame['description'][:80]}...\n"
+                    
+                    # Ask VLM to compare - improved prompt
+                    conversation = [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "image", "image": image},
+                                {"type": "text", "text": f"""Previous frames summary:
+{previous_context}
+
+Look at the current image. Does it show NEW or DIFFERENT content?
+- New text, numbers, equations, or calculations?
+- Different step in solving a problem?
+- New visual elements or changes?
+
+Answer 'YES' if there's ANY new or different content. Answer 'NO' only if it's almost identical."""},
+                            ],
+                        },
+                    ]
+                    
+                    inputs = processor.apply_chat_template(
+                        conversation,
+                        add_generation_prompt=True,
+                        return_tensors="pt",
+                        return_dict=True,
+                        tokenize=True,
+                    ).to(model.device)
+                    
+                    input_length = inputs['input_ids'].shape[1]
+                    
+                    outputs = model.generate(
+                        **inputs, 
+                        max_new_tokens=50,
+                        do_sample=True,
+                        temperature=0.5
+                    )
+                    
+                    # Decode only the NEW tokens
+                    new_tokens = outputs[0][input_length:]
+                    response = processor.decode(new_tokens, skip_special_tokens=True).strip()
+                    
+                    # Check if VLM says it's different - more lenient
+                    response_upper = response.upper()
+                    is_different = "YES" in response_upper[:100] or "NEW" in response_upper[:100] or "DIFFERENT" in response_upper[:100]
+                    
+                    if is_different:
+                        # Frame is different - get full description
+                        conversation = [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "image", "image": image},
+                                    {"type": "text", "text": "Describe what you see in this frame. Focus on: 1) Any text, numbers, equations, or mathematical expressions. 2) Any solutions, answers, or calculations. 3) Key objects or content. Be specific."},
+                                ],
+                            },
+                        ]
+                        
+                        inputs = processor.apply_chat_template(
+                            conversation,
+                            add_generation_prompt=True,
+                            return_tensors="pt",
+                            return_dict=True,
+                            tokenize=True,
+                        ).to(model.device)
+                        
+                        input_length = inputs['input_ids'].shape[1]
+                        
+                        outputs = model.generate(
+                            **inputs, 
+                            max_new_tokens=150,
+                            do_sample=True,
+                            temperature=0.5
+                        )
+                        
+                        # Decode only the NEW tokens
+                        new_tokens = outputs[0][input_length:]
+                        description = processor.decode(new_tokens, skip_special_tokens=True).strip()
+                        
+                        # Add to results
+                        all_frames.append({
+                            "frame_number": second_count,
+                            "timestamp_seconds": round(timestamp, 2),
+                            "timestamp_formatted": f"{int(timestamp // 60):02d}:{int(timestamp % 60):02d}",
+                            "description": description
+                        })
+                        
+                        status_text.text(f"✓ Frame {second_count} added (NEW content detected)")
+                    else:
+                        # Frame is similar - skip it
+                        skipped_count += 1
+                        status_text.text(f"⏭️ Frame {second_count} skipped (similar to previous) - {skipped_count} skipped")
+                
+                else:
+                    # Smart filtering disabled - add all frames
+                    conversation = [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "image", "image": image},
+                                {"type": "text", "text": "Describe what you see in this frame. Focus on: 1) Any text, numbers, equations. 2) Any solutions or calculations. 3) Key content."},
+                            ],
+                        },
+                    ]
+                    
+                    inputs = processor.apply_chat_template(
+                        conversation,
+                        add_generation_prompt=True,
+                        return_tensors="pt",
+                        return_dict=True,
+                        tokenize=True,
+                    ).to(model.device)
+                    
+                    input_length = inputs['input_ids'].shape[1]
+                    
+                    outputs = model.generate(
+                        **inputs, 
+                        max_new_tokens=150,
+                        do_sample=True,
+                        temperature=0.5
+                    )
+                    
+                    # Decode only the NEW tokens
+                    new_tokens = outputs[0][input_length:]
+                    description = processor.decode(new_tokens, skip_special_tokens=True).strip()
+                    
+                    all_frames.append({
+                        "frame_number": second_count,
+                        "timestamp_seconds": round(timestamp, 2),
+                        "timestamp_formatted": f"{int(timestamp // 60):02d}:{int(timestamp % 60):02d}",
+                        "description": description
+                    })
         
         frame_count += 1
     
     cap.release()
     progress_bar.progress(1.0)
-    status_text.text(f"✓ Complete! Analyzed {second_count} frames")
+    status_text.text(f"✓ Complete! Saved {len(all_frames)} frames, skipped {skipped_count} similar frames")
     
     return all_frames
 
+
 def chat_with_video(user_question, video_data, text_model, tokenizer):
-    """Chat with the text model using video frame data as context"""
+    """Simple chat - search through video frames using text model"""
     
-    # Prepare simplified context from video frames
-    context_summary = f"Video: {video_data['video_name']}\nTotal frames: {video_data['total_frames']}\n\n"
+    # Build context from all frames (concise version)
+    context = "VIDEO FRAMES:\n\n"
     
-    # Build frame information
-    frames_text = ""
     for frame in video_data['frames']:
-        frames_text += f"[Frame {frame['frame_number']} at {frame['timestamp_formatted']} ({frame['timestamp_seconds']}s)]: {frame['description']}\n\n"
+        context += f"Frame {frame['frame_number']} at {frame['timestamp_formatted']} ({frame['timestamp_seconds']}s):\n"
+        context += f"{frame['description']}\n\n"
     
-    # Create a focused prompt
-    prompt = f"""You are helping a user find specific information in a video by analyzing frame descriptions.
-
-VIDEO INFORMATION:
-{context_summary}
-
-FRAME DESCRIPTIONS:
-{frames_text}
+    # Simple prompt
+    prompt = f"""{context}
 
 USER QUESTION: {user_question}
 
-INSTRUCTIONS:
-- If the user asks about specific content (like "final answer", "solution", "where it explains X"), find the EXACT frame numbers and timestamps that contain that information
-- List the specific frame numbers and timestamps in your response
-- Quote the relevant parts from the frame descriptions
-- Be concise and direct
-- If you can't find the information, say so clearly
-
-Answer:"""
+ANSWER (provide frame numbers and timestamps if relevant):"""
     
-    # Generate response
-    input_ids = tokenizer.apply_chat_template(
-        [{"role": "user", "content": prompt}],
-        add_generation_prompt=True,
-        return_tensors="pt",
-        tokenize=True,
-    ).to(text_model.device)
+    # Generate answer
+    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(text_model.device)
     
     output = text_model.generate(
         input_ids,
         do_sample=True,
         temperature=0.3,
-        min_p=0.15,
-        repetition_penalty=1.05,
-        max_new_tokens=512,
+        max_new_tokens=200,
+        pad_token_id=tokenizer.eos_token_id,
     )
     
-    response = tokenizer.decode(output[0], skip_special_tokens=True)
-    
-    # Extract just the assistant's response
-    if "<|im_start|>assistant" in response:
-        response = response.split("<|im_start|>assistant")[-1].strip()
-    if "<|im_end|>" in response:
-        response = response.split("<|im_end|>")[0].strip()
+    # Decode only the new tokens (skip input)
+    response = tokenizer.decode(output[0][input_ids.shape[1]:], skip_special_tokens=True).strip()
     
     return response
 
@@ -212,6 +344,9 @@ def main():
     with tab1:
         # Choose input method
         input_method = st.radio("Choose input method:", ["Upload File", "YouTube URL"])
+        
+        # Smart filtering toggle
+        smart_filtering = st.checkbox("🧠 Enable Smart Filtering (VLM checks for frame changes)", value=True)
         
         video_path = None
         video_name = None
@@ -248,8 +383,8 @@ def main():
                 vision_model, processor = load_vision_model()
             st.success("✓ Vision model loaded!")
             
-            # Process video
-            results = process_video(video_path, vision_model, processor)
+            # Process video (VLM does all the work)
+            results = process_video(video_path, vision_model, processor, smart_filtering)
             
             if results:
                 # Create output directory
@@ -260,6 +395,7 @@ def main():
                 output_data = {
                     "video_name": video_name,
                     "total_frames": len(results),
+                    "smart_filtering_enabled": smart_filtering,
                     "frames": results
                 }
                 
@@ -276,6 +412,14 @@ def main():
                 st.markdown("---")
                 st.header("📊 Results")
                 
+                # Stats
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Frames Saved", len(results))
+                with col2:
+                    if smart_filtering:
+                        st.metric("Quality", "Filtered for changes")
+                
                 # Show as table
                 for frame in results:
                     col1, col2, col3 = st.columns([1, 1, 5])
@@ -284,7 +428,7 @@ def main():
                     with col2:
                         st.markdown(f"`{frame['timestamp_formatted']}`")
                     with col3:
-                        st.markdown(frame['description'])
+                        st.markdown(frame['description'][:200] + "..." if len(frame['description']) > 200 else frame['description'])
                 
                 # Download button
                 json_str = json.dumps(output_data, indent=4)
@@ -299,7 +443,7 @@ def main():
                 if os.path.exists(video_path):
                     os.unlink(video_path)
                 
-                st.info("✨ Now go to the 'Chat with Video' tab to ask questions about your video!")
+                st.info("✨ Now go to the 'Chat with Video' tab to ask questions!")
         
         if not video_path and input_method == "Upload File":
             st.info("👆 Upload a video file to get started")
@@ -308,33 +452,42 @@ def main():
     
     # Tab 2: Chat Interface
     with tab2:
+        # Option to load existing JSON
+        st.markdown("### 📂 Load Video Analysis")
+        uploaded_json = st.file_uploader("Upload existing JSON analysis (optional)", type=['json'], key="json_uploader")
+        if uploaded_json:
+            loaded_data = json.load(uploaded_json)
+            st.session_state.video_data = loaded_data
+            st.success(f"✓ Loaded: {loaded_data['video_name']} ({loaded_data['total_frames']} frames)")
+        
         if st.session_state.video_data is None:
-            st.warning("⚠️ Please analyze a video first in the 'Video Analysis' tab")
+            st.warning("⚠️ Please analyze a video first or upload a JSON file")
         else:
-            st.success(f"✓ Loaded video: {st.session_state.video_data['video_name']}")
-            st.info(f"📊 Total frames: {st.session_state.video_data['total_frames']}")
+            st.success(f"✓ Loaded: {st.session_state.video_data['video_name']}")
+            st.info(f"📊 {st.session_state.video_data['total_frames']} frames available")
             
             # Load text model
             if 'text_model' not in st.session_state:
                 with st.spinner("Loading chat model..."):
-                    text_model, tokenizer = load_text_model()
+                    text_model, text_tokenizer = load_text_model()
                     st.session_state.text_model = text_model
-                    st.session_state.tokenizer = tokenizer
+                    st.session_state.text_tokenizer = text_tokenizer
                 st.success("✓ Chat model loaded!")
             
             # Chat interface
             st.markdown("---")
-            st.subheader("💬 Ask questions about your video")
+            st.subheader("💬 Ask Questions")
+            
+            st.info("💡 Ask questions about the video - AI will search through all frames")
             
             # Example questions
-            with st.expander("💡 Example questions"):
+            with st.expander("📋 Example questions"):
                 st.markdown("""
-                - "Pull me the frame where the final answer is shown"
-                - "What frames show the final step?"
-                - "Which frame explains the solution?"
-                - "Show me frames with mathematical equations"
-                - "What happens at 00:20?"
-                - "Find frames where it explains [specific topic]"
+                - "What frame shows the final answer?"
+                - "Where is the solution explained?"
+                - "What does frame 12 talk about?"
+                - "Show me frames with equations"
+                - "When does the calculation happen?"
                 """)
             
             # Display chat history
@@ -342,7 +495,7 @@ def main():
                 with st.chat_message("user"):
                     st.write(chat["question"])
                 with st.chat_message("assistant"):
-                    st.write(chat["answer"])
+                    st.markdown(chat["answer"])
             
             # Chat input
             user_question = st.chat_input("Ask a question about your video...")
@@ -354,14 +507,14 @@ def main():
                 
                 # Generate response
                 with st.chat_message("assistant"):
-                    with st.spinner("Thinking..."):
+                    with st.spinner("🔍 Searching..."):
                         answer = chat_with_video(
                             user_question,
                             st.session_state.video_data,
                             st.session_state.text_model,
-                            st.session_state.tokenizer
+                            st.session_state.text_tokenizer
                         )
-                    st.write(answer)
+                    st.markdown(answer)
                 
                 # Save to chat history
                 st.session_state.chat_history.append({
