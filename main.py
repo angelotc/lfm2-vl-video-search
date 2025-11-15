@@ -25,7 +25,7 @@ def load_model(model_id="LiquidAI/LFM2-VL-450M"):
     return model, processor
 
 def extract_frames(video_path, frame_interval):
-    """Extract frames from video at specified interval"""
+    """Extract frames from video at specified interval, with temporal context frames"""
     frames_data = []
     cap = cv2.VideoCapture(video_path)
 
@@ -35,30 +35,50 @@ def extract_frames(video_path, frame_interval):
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
+    # First pass: extract all frames into a buffer
+    all_frames = []
     frame_count = 0
-    second_count = 0
 
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
-
-        if frame_count % frame_interval == 0:
-            second_count += 1
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            image = Image.fromarray(frame_rgb)
-            frames_data.append({
-                "frame_number": second_count,
-                "image": image
-            })
-
+        all_frames.append(frame)
         frame_count += 1
 
     cap.release()
+
+    # Second pass: create temporal windows (before, current, after)
+    second_count = 0
+    for i in range(0, len(all_frames), frame_interval):
+        second_count += 1
+
+        # Get temporal context frames (frame before, current, frame after)
+        temporal_frames = []
+
+        # Frame N-1 (before) - 15 frames before current
+        before_idx = max(0, i - 15)
+        frame_rgb = cv2.cvtColor(all_frames[before_idx], cv2.COLOR_BGR2RGB)
+        temporal_frames.append(Image.fromarray(frame_rgb))
+
+        # Frame N (current)
+        frame_rgb = cv2.cvtColor(all_frames[i], cv2.COLOR_BGR2RGB)
+        temporal_frames.append(Image.fromarray(frame_rgb))
+
+        # Frame N+1 (after) - 15 frames after current
+        after_idx = min(len(all_frames) - 1, i + 15)
+        frame_rgb = cv2.cvtColor(all_frames[after_idx], cv2.COLOR_BGR2RGB)
+        temporal_frames.append(Image.fromarray(frame_rgb))
+
+        frames_data.append({
+            "frame_number": second_count,
+            "images": temporal_frames  # Now contains 3 images instead of 1
+        })
+
     return frames_data, fps, total_frames
 
-def process_frame_batch(frames_batch, model, processor):
-    """Process a batch of frames with the model"""
+def process_frame_batch(frames_batch, model, processor, previous_descriptions=None):
+    """Process a batch of frames with the model, using temporal context"""
     if not frames_batch:
         return []
 
@@ -66,12 +86,24 @@ def process_frame_batch(frames_batch, model, processor):
 
     # Process frames in batch
     for frame_data in frames_batch:
+        frame_num = frame_data["frame_number"]
+        temporal_images = frame_data["images"]  # List of 3 images: [before, current, after]
+
+        # Multi-frame temporal prompt
+        prompt = "You are viewing 3 consecutive frames from a video (before, current, after). Describe what ACTION or MOVEMENT is occurring in the middle frame. Focus on: 1) What the main subjects are DOING (not just their appearance), 2) Any motion or change between frames, 3) Specific actions like jumping, throwing, catching, running, etc. Be concise and action-focused."
+
+        # Build conversation with all 3 images
         conversation = [
             {
                 "role": "user",
                 "content": [
-                    {"type": "image", "image": frame_data["image"]},
-                    {"type": "text", "text": "Describe this frame in 10 words or less using keywords only."},
+                    {"type": "text", "text": "Frame BEFORE:"},
+                    {"type": "image", "image": temporal_images[0]},
+                    {"type": "text", "text": "Frame CURRENT (describe this one):"},
+                    {"type": "image", "image": temporal_images[1]},
+                    {"type": "text", "text": "Frame AFTER:"},
+                    {"type": "image", "image": temporal_images[2]},
+                    {"type": "text", "text": prompt},
                 ],
             },
         ]
@@ -88,17 +120,38 @@ def process_frame_batch(frames_batch, model, processor):
         inputs = {k: v.to(model.device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
 
         outputs = model.generate(**inputs, max_new_tokens=128)
-        description = processor.batch_decode(outputs, skip_special_tokens=True)[0]
+
+        # Decode only the generated tokens (not the entire prompt)
+        generated_ids = outputs[:, inputs['input_ids'].shape[1]:]
+        description = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+
+        # Clean up any residual formatting
+        description = description.strip()
 
         results.append({
-            "frame_number": frame_data["frame_number"],
+            "frame_number": frame_num,
             "text": description
         })
 
     return results
 
-def process_video(video_path, model, processor, batch_size=4, max_workers=2):
-    """Process video and extract frame descriptions with parallel processing"""
+def save_incremental_json(video_name, all_results, output_dir, is_final=False):
+    """Save results to JSON file incrementally"""
+    output_data = {
+        "video_name": video_name,
+        "total_frames": len(all_results),
+        "frames": sorted(all_results, key=lambda x: x["frame_number"]),
+        "status": "complete" if is_final else "in_progress"
+    }
+
+    json_filename = os.path.join(output_dir, "video_analysis.json")
+    with open(json_filename, 'w', encoding='utf-8') as f:
+        json.dump(output_data, f, indent=4)
+
+    return json_filename
+
+def process_video(video_path, model, processor, video_name, output_dir, batch_size=4, max_workers=2, save_interval=8):
+    """Process video and extract frame descriptions with parallel processing and incremental saving"""
 
     # Step 1: Extract all frames first
     status_text = st.empty()
@@ -123,38 +176,36 @@ def process_video(video_path, model, processor, batch_size=4, max_workers=2):
 
     all_results = []
     processed_count = 0
+    last_save_count = 0
 
-    # Step 3: Process batches in parallel
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all batches
-        future_to_batch = {
-            executor.submit(process_frame_batch, batch, model, processor): batch_idx
-            for batch_idx, batch in enumerate(batches)
-        }
+    # Step 3: Process batches sequentially
+    for batch_idx, batch in enumerate(batches):
+        try:
+            batch_results = process_frame_batch(batch, model, processor)
+            all_results.extend(batch_results)
+            processed_count += len(batch_results)
 
-        # Collect results as they complete
-        for future in as_completed(future_to_batch):
-            batch_idx = future_to_batch[future]
-            try:
-                batch_results = future.result()
-                all_results.extend(batch_results)
-                processed_count += len(batch_results)
+            # Update progress
+            progress = processed_count / num_frames
+            progress_bar.progress(min(progress, 1.0))
+            status_text.text(f"Processing: {processed_count}/{num_frames} frames complete")
 
-                # Update progress
-                progress = processed_count / num_frames
-                progress_bar.progress(min(progress, 1.0))
-                status_text.text(f"Processing: {processed_count}/{num_frames} frames complete")
+            # Save incrementally every N frames
+            if processed_count - last_save_count >= save_interval:
+                json_filename = save_incremental_json(video_name, all_results, output_dir, is_final=False)
+                last_save_count = processed_count
+                status_text.text(f"Processing: {processed_count}/{num_frames} frames complete | 💾 Saved checkpoint")
 
-            except Exception as e:
-                st.error(f"Error processing batch {batch_idx}: {str(e)}")
+        except Exception as e:
+            st.error(f"Error processing batch {batch_idx}: {str(e)}")
 
-    # Sort results by frame number
-    all_results.sort(key=lambda x: x["frame_number"])
+    # Final save with complete status
+    json_filename = save_incremental_json(video_name, all_results, output_dir, is_final=True)
 
     progress_bar.progress(1.0)
     status_text.text(f"✓ Complete! Analyzed {len(all_results)} frames")
 
-    return all_results
+    return all_results, json_filename
 
 def main():
     st.set_page_config(page_title="Video Frame Analyzer", page_icon="🎬", layout="wide")
@@ -195,36 +246,35 @@ def main():
             with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
                 tmp_file.write(uploaded_file.read())
                 video_path = tmp_file.name
+            # Create output directory
+            output_dir = "video_frames_analysis"
+            os.makedirs(output_dir, exist_ok=True)
+
             # Load model
             with st.spinner("Loading model..."):
                 model, processor = load_model()
             st.success("✓ Model loaded!")
 
-            # Process video with performance settings
-            results = process_video(video_path, model, processor, batch_size=batch_size, max_workers=max_workers)
-            
-            if results:
-                # Create output directory
-                output_dir = "video_frames_analysis"
-                os.makedirs(output_dir, exist_ok=True)
-                
-                # Save to single JSON file
-                output_data = {
-                    "video_name": uploaded_file.name,
-                    "total_frames": len(results),
-                    "frames": results
-                }
-                
-                json_filename = os.path.join(output_dir, "video_analysis.json")
-                with open(json_filename, 'w', encoding='utf-8') as f:
-                    json.dump(output_data, f, indent=4)
-                
+            # Process video with performance settings and incremental saving
+            result = process_video(
+                video_path,
+                model,
+                processor,
+                video_name=uploaded_file.name,
+                output_dir=output_dir,
+                batch_size=batch_size,
+                max_workers=max_workers,
+                save_interval=8
+            )
+
+            if result:
+                results, json_filename = result
                 st.success(f"✓ Saved to: {json_filename}")
-                
+
                 # Display results
                 st.markdown("---")
                 st.header("📊 Results")
-                
+
                 # Show as table
                 for frame in results:
                     col1, col2 = st.columns([1, 4])
@@ -232,8 +282,14 @@ def main():
                         st.markdown(f"**Frame {frame['frame_number']}**")
                     with col2:
                         st.markdown(frame['text'])
-                
-                # Download button
+
+                # Prepare data for download button
+                output_data = {
+                    "video_name": uploaded_file.name,
+                    "total_frames": len(results),
+                    "frames": results,
+                    "status": "complete"
+                }
                 json_str = json.dumps(output_data, indent=4)
                 st.download_button(
                     label="📥 Download JSON",

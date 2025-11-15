@@ -27,7 +27,7 @@ Both apps will open in the browser at `http://localhost:8501`
 ### Required Dependencies
 The current `requirements.txt` is incomplete. Full dependencies needed:
 ```bash
-pip install streamlit transformers torch opencv-python pillow accelerate
+pip install streamlit transformers torch opencv-python pillow accelerate numpy
 ```
 
 ## Architecture
@@ -39,8 +39,9 @@ pip install streamlit transformers torch opencv-python pillow accelerate
   - Save videos to `uploads/` directory
 
 - **`main.py`**: Core semantic video processing application
-  - Frame extraction at 1 FPS intervals
-  - VLM-based frame description generation
+  - Temporal frame extraction (before, current, after frames)
+  - VLM-based action/movement description generation
+  - Sequential batch processing with incremental saves
   - JSON output with frame-level annotations
   - Progress tracking and visualization
 
@@ -53,62 +54,91 @@ pip install streamlit transformers torch opencv-python pillow accelerate
 1. **Video Upload**: User uploads video via Streamlit file uploader
 2. **Performance Configuration**: User sets batch size and worker threads
    - Batch size: 1-16 frames per batch (default: 4)
-   - Worker threads: 1-4 parallel workers (default: 2)
+   - Worker threads: 1-4 (displayed for reference, currently uses sequential processing)
 3. **Model Loading**: Cached loading of LFM2-VL model
    - Model: `LiquidAI/LFM2-VL-450M` from HuggingFace (configurable)
-   - Device: CPU with float16 precision
+   - Device: CPU with bfloat16 precision
    - Manual device management (no device_map="auto")
-4. **Frame Extraction** (Phase 1):
-   - Extract frames at fixed interval (every 30 frames) using OpenCV
+4. **Temporal Frame Extraction** (Phase 1):
+   - Extract ALL frames into memory buffer using OpenCV
+   - For each sampled frame (every 30 frames), create temporal window:
+     - Frame N-1: 15 frames before current (or earliest available)
+     - Frame N: Current frame
+     - Frame N+1: 15 frames after current (or latest available)
    - Convert BGR to RGB for model compatibility
-   - Store all frames in memory before processing
-5. **Parallel VLM Processing** (Phase 2):
-   - Split frames into batches
-   - Process batches in parallel using ThreadPoolExecutor
-   - Each worker processes one batch at a time
-   - Apply chat template with image + text prompt
-   - Prompt: "Describe this frame in 10 words or less using keywords only."
+   - Store as triplets of PIL Images
+5. **Sequential VLM Processing** (Phase 2):
+   - Split temporal frame triplets into batches
+   - Process batches sequentially (not parallel)
+   - For each triplet, apply multi-image chat template:
+     - Shows "Frame BEFORE", "Frame CURRENT", "Frame AFTER"
+     - Prompt focuses on ACTION and MOVEMENT detection
+     - Model analyzes temporal context to identify motion
    - Generate description with max 128 new tokens
-6. **Output Generation**:
-   - Sort results by frame number
-   - Save results to `video_frames_analysis/video_analysis.json`
-   - Format: `{video_name, total_frames, frames: [{frame_number, text}]}`
+   - Extract only new tokens (not prompt) from output
+6. **Incremental Saving & Output Generation**:
+   - Save JSON checkpoint every 8 processed frames
+   - Results auto-sorted by frame number before each save
+   - Intermediate saves marked with `"status": "in_progress"`
+   - Final save marked with `"status": "complete"`
+   - Output file: `video_frames_analysis/video_analysis.json`
+   - Format: `{video_name, total_frames, frames: [{frame_number, text}], status}`
    - Display results in-app and provide JSON download
 
 ### Key Components
 
-**Model Loading (`@st.cache_resource`)**
+**Model Loading (`@st.cache_resource` in main.py:12-25)**
 - Caches model and processor across reruns for performance
 - Uses `AutoModelForImageTextToText` and `AutoProcessor` from transformers
-- Automatic device detection (CUDA if available, otherwise CPU)
-- Uses float16 on GPU for efficiency, float32 on CPU for compatibility
+- Fixed to CPU device (no automatic device detection)
+- Uses bfloat16 precision for efficiency
 - Avoids `device_map="auto"` to prevent meta device errors
 
-**Frame Extraction (`extract_frames`)**
-- Separated extraction phase for better performance
+**Temporal Frame Extraction (`extract_frames` in main.py:27-78)**
+- Two-pass extraction for temporal context:
+  1. First pass: Load ALL video frames into memory buffer
+  2. Second pass: For each sampled position, extract 3-frame windows
 - Opens video with OpenCV (`cv2.VideoCapture`)
 - Extracts FPS and total frame count
-- Samples frames at fixed interval (configurable, default every 30 frames)
-- Stores all frames in memory as PIL Images before processing
+- Samples frames at fixed interval (default every 30 frames)
+- Creates temporal triplets: [before (-15 frames), current, after (+15 frames)]
+- Returns list of frame data with `frame_number` and `images` (3 PIL Images)
 
-**Parallel Processing (`process_video` + `process_frame_batch`)**
-- Uses `ThreadPoolExecutor` for concurrent batch processing
-- Frames split into configurable batches (default: 4 frames/batch)
-- Multiple workers process batches in parallel (default: 2 workers)
-- Progress tracking updates as batches complete
-- Results sorted by frame number after all processing completes
-- Converts each frame to PIL Image for model input
+**Sequential Batch Processing (`process_video` + `process_frame_batch` in main.py:80-208)**
+- Split temporal frame triplets into batches (default: 4 triplets/batch)
+- Process batches sequentially (not parallel, despite UI showing worker setting)
+- For each frame triplet in batch:
+  - Build multi-image conversation with 3 images and temporal prompt
+  - Apply chat template with all 3 images inline
+  - Generate description focusing on actions/movements
+  - Decode only generated tokens (exclude prompt from output)
+- Progress tracking updates after each batch
+- Results collected and sorted by frame number
 
-**Conversation Template**
+**Incremental Saving (`save_incremental_json` in main.py:138-151)**
+- Auto-saves progress every 8 frames (configurable via `save_interval` parameter)
+- Prevents data loss if processing is interrupted
+- Each save includes all processed frames sorted by frame number
+- Status field indicates "in_progress" or "complete"
+- Same file (`video_analysis.json`) updated with latest results
+- UI shows "💾 Saved checkpoint" message when saving occurs
+
+**Multi-Image Conversation Template**
 - Uses vision-language chat format with role-based messages
-- Each frame analyzed independently (no cross-frame context)
-- Text prompt designed for concise keyword extraction
+- Each frame gets temporal context from adjacent frames
+- Conversation structure (main.py:96-109):
+  - "Frame BEFORE:" + image
+  - "Frame CURRENT (describe this one):" + image
+  - "Frame AFTER:" + image
+  - Action-focused prompt
+- Prompt designed for action/movement detection, not static descriptions
 
 **Output Format**
 ```json
 {
   "video_name": "example.mp4",
   "total_frames": 120,
+  "status": "complete",
   "frames": [
     {"frame_number": 1, "text": "person walking, outdoor scene, daytime"},
     {"frame_number": 2, "text": "building, street, cars parked"}
@@ -116,40 +146,50 @@ pip install streamlit transformers torch opencv-python pillow accelerate
 }
 ```
 
+The `status` field will be:
+- `"in_progress"` during processing (incremental saves)
+- `"complete"` when all frames are processed
+
 ## Important Implementation Details
 
 ### Frame Sampling Strategy
-- Current: Every 30 frames (`frame_interval = 30` in main.py:108)
+- Current: Every 30 frames (`frame_interval = 30` in main.py:160)
 - For 30fps video: ~1 frame per second
 - For 60fps video: ~2 frames per second
+- Temporal window offset: ±15 frames from sampled position
 - Adjustable by modifying `frame_interval` in `extract_frames()` call
 - Trade-off: Higher sampling = more detail but slower processing
+- **Memory warning**: ALL frames loaded into memory before sampling
 
-### Parallel Processing Performance
-- **Batch size**: Controls memory usage and GPU utilization
-  - Smaller batches (1-2): Lower memory, more overhead
-  - Larger batches (8-16): Higher memory, better throughput (if GPU available)
-  - Default (4): Good balance for CPU processing
-- **Worker threads**: Controls parallelism
-  - CPU-only: Limited benefit beyond 2-3 workers (GIL + model serialization)
-  - GPU: Can benefit from more workers if VRAM allows
-  - Default (2): Conservative setting for CPU
-- **Expected speedup**: 1.5-2x on CPU with 2 workers, depends on batch size and model
+### Batch Processing Performance
+- **Batch size**: Controls how many frame triplets processed per iteration
+  - Smaller batches (1-2): Lower memory, more frequent progress updates
+  - Larger batches (8-16): Higher memory usage (3 images per frame triplet)
+  - Default (4): Processes 12 images per batch (4 triplets × 3 images each)
+- **Worker threads**: Currently unused (UI setting has no effect)
+  - Processing is sequential, not parallel
+  - Setting displayed for future parallelization
+- **Processing mode**: Sequential batches (no ThreadPoolExecutor)
+- **Expected performance**: Linear with number of frames, ~5-15 sec/frame on CPU
 
 ### Model Prompt Engineering
-- Current prompt focuses on keyword extraction (10 words or less)
-- Located in line 69 of main.py
+- Current prompt focuses on action and movement detection (main.py:93)
+- Full prompt: "You are viewing 3 consecutive frames from a video (before, current, after). Describe what ACTION or MOVEMENT is occurring in the middle frame. Focus on: 1) What the main subjects are DOING (not just their appearance), 2) Any motion or change between frames, 3) Specific actions like jumping, throwing, catching, running, etc. Be concise and action-focused."
 - Can be customized for different use cases:
-  - Detailed descriptions: "Describe this frame in detail"
-  - Object detection: "List all objects visible in this frame"
-  - Scene classification: "Classify the scene type"
+  - Static descriptions: "Describe the objects and scene in the middle frame"
+  - Object tracking: "Identify which objects moved between frames"
+  - Scene transitions: "Describe how the scene changed from before to after"
 
 ### Performance Considerations
-- **First run**: Model download from HuggingFace (~3.2GB)
-- **GPU recommended**: Processing 1 frame/second video can take significant time on CPU
-- **Memory usage**: Model requires ~4GB RAM minimum (more on CPU)
+- **First run**: Model download from HuggingFace (~3.2GB for LFM2-VL-450M)
+- **GPU NOT supported**: Currently hardcoded to CPU device
+- **Memory usage**:
+  - Model requires ~4GB RAM minimum
+  - Video frames: ALL frames loaded into memory (can be large for long videos)
+  - Each sampled frame creates 3 PIL Images (triplet)
 - **Caching**: Streamlit caches model between reruns but not between sessions
-- **Device handling**: Automatically uses GPU (CUDA) if available, falls back to CPU with float32
+- **Device handling**: Fixed to CPU with bfloat16 precision (no automatic detection)
+- **Processing time**: Expect 5-15 seconds per frame triplet on CPU
 
 ## Extension Points for Semantic Search
 
@@ -180,7 +220,19 @@ To build a complete semantic search system, the following components are needed:
 - **No semantic search implemented**: Only generates descriptions, no search capability
 - **No embeddings**: Text descriptions are not vectorized
 - **No indexing**: Results stored as flat JSON files
-- **No cross-frame context**: Each frame analyzed independently
+- **GPU not utilized**: Hardcoded to CPU device, no CUDA support
 - **Fixed prompting**: Single hardcoded prompt for all frames
-- **No batch processing**: Videos processed sequentially, one at a time
-- **Incomplete requirements.txt**: Missing several critical dependencies
+- **Memory intensive**: ALL video frames loaded into memory at once
+- **Worker setting unused**: UI shows worker threads but processing is sequential
+- **Single video at a time**: No batch video processing
+- **Incomplete requirements.txt**: Missing several critical dependencies (torch, opencv-python, pillow, accelerate, numpy)
+
+## Key Architectural Differences from Initial Design
+
+The codebase has evolved significantly. Important changes to be aware of:
+
+1. **Temporal Context**: Changed from single-frame to 3-frame temporal windows
+2. **Processing Mode**: Changed from parallel ThreadPoolExecutor to sequential batch processing
+3. **Prompt Focus**: Changed from keyword extraction to action/movement detection
+4. **Device Handling**: Changed from auto-detection to hardcoded CPU
+5. **Memory Strategy**: ALL frames now buffered in memory (two-pass extraction)
