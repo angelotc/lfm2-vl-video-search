@@ -1,0 +1,8 @@
+torch
+torchvision
+transformers
+accelerate
+opencv-python
+Pillow
+streamlit
+yt_dlp
