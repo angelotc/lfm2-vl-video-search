@@ -2,360 +2,199 @@ import cv2
 import json
 import os
 import streamlit as st
-from transformers import AutoProcessor, AutoModelForImageTextToText
-from PIL import Image
 import tempfile
-import torch
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import numpy as np
-from sentence_transformers import SentenceTransformer
 from pathlib import Path
+import yt_dlp
+import hashlib
 
-@st.cache_resource
-def load_model(model_id="LiquidAI/LFM2-VL-450M"):
-    """Load the vision-language model and processor"""
-    # Determine device
-    device = "cpu"
+# Import from embeddings package
+from embeddings import (
+    load_model,
+    load_embedding_model,
+    process_video,
+    search_frames,
+    get_frame_timestamp,
+    extract_clip
+)
 
-    # For CPU, use float32 for better compatibility
-    model = AutoModelForImageTextToText.from_pretrained(
-        model_id,
-        dtype="bfloat16"
-    )
 
-    processor = AutoProcessor.from_pretrained(model_id)
-    return model, processor
+def hash_youtube_url(url):
+    """
+    Create a hash of the YouTube URL to use as a unique identifier.
 
-@st.cache_resource
-def load_embedding_model(model_id="sentence-transformers/all-MiniLM-L6-v2"):
-    """Load the sentence transformer model for embedding text descriptions"""
-    embedding_model = SentenceTransformer(model_id)
-    return embedding_model
+    Args:
+        url: YouTube video URL
 
-def extract_frames(video_path, frame_interval):
-    """Extract frames from video at specified interval, with temporal context frames"""
-    frames_data = []
-    cap = cv2.VideoCapture(video_path)
+    Returns:
+        str: SHA256 hash of the URL (first 16 characters)
+    """
+    return hashlib.sha256(url.encode()).hexdigest()[:16]
 
-    if not cap.isOpened():
-        return None, None, None
 
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+def download_youtube_video(url, output_path=None):
+    """
+    Download video from YouTube URL using yt-dlp.
 
-    # First pass: extract all frames into a buffer
-    all_frames = []
-    frame_count = 0
+    Args:
+        url: YouTube video URL
+        output_path: Directory to save video (creates temp dir if None)
 
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-        all_frames.append(frame)
-        frame_count += 1
+    Returns:
+        tuple: (video_path, video_title) or (None, None) on error
+    """
+    if output_path is None:
+        output_path = tempfile.mkdtemp()
 
-    cap.release()
-
-    # Second pass: create temporal windows (before, current, after)
-    second_count = 0
-    for i in range(0, len(all_frames), frame_interval):
-        second_count += 1
-
-        # Get temporal context frames (frame before, current, frame after)
-        temporal_frames = []
-
-        # Frame N-1 (before) - 15 frames before current
-        before_idx = max(0, i - 15)
-        frame_rgb = cv2.cvtColor(all_frames[before_idx], cv2.COLOR_BGR2RGB)
-        temporal_frames.append(Image.fromarray(frame_rgb))
-
-        # Frame N (current)
-        frame_rgb = cv2.cvtColor(all_frames[i], cv2.COLOR_BGR2RGB)
-        temporal_frames.append(Image.fromarray(frame_rgb))
-
-        # Frame N+1 (after) - 15 frames after current
-        after_idx = min(len(all_frames) - 1, i + 15)
-        frame_rgb = cv2.cvtColor(all_frames[after_idx], cv2.COLOR_BGR2RGB)
-        temporal_frames.append(Image.fromarray(frame_rgb))
-
-        frames_data.append({
-            "frame_number": second_count,
-            "images": temporal_frames  # Now contains 3 images instead of 1
-        })
-
-    return frames_data, fps, total_frames
-
-def process_frame_batch(frames_batch, model, processor, embedding_model, previous_descriptions=None):
-    """Process a batch of frames with the model, using temporal context"""
-    if not frames_batch:
-        return []
-
-    results = []
-
-    # Process frames in batch
-    for frame_data in frames_batch:
-        frame_num = frame_data["frame_number"]
-        temporal_images = frame_data["images"]  # List of 3 images: [before, current, after]
-
-        # Multi-frame temporal prompt
-        prompt = "You are viewing 3 consecutive frames from a video (before, current, after). Describe what ACTION or MOVEMENT is occurring in the middle frame. Focus on: 1) What the main subjects are DOING (not just their appearance), 2) Any motion or change between frames, 3) Specific actions like jumping, throwing, catching, running, etc. Be concise and action-focused."
-
-        # Build conversation with all 3 images
-        conversation = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Frame BEFORE:"},
-                    {"type": "image", "image": temporal_images[0]},
-                    {"type": "text", "text": "Frame CURRENT (describe this one):"},
-                    {"type": "image", "image": temporal_images[1]},
-                    {"type": "text", "text": "Frame AFTER:"},
-                    {"type": "image", "image": temporal_images[2]},
-                    {"type": "text", "text": prompt},
-                ],
-            },
-        ]
-
-        inputs = processor.apply_chat_template(
-            conversation,
-            add_generation_prompt=True,
-            return_tensors="pt",
-            return_dict=True,
-            tokenize=True,
-        )
-
-        # Move inputs to the same device as model
-        inputs = {k: v.to(model.device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
-
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=128,
-            temperature=0.1,
-            min_p=0.15,
-            repetition_penalty=1.05
-        )
-
-        # Decode only the generated tokens (not the entire prompt)
-        generated_ids = outputs[:, inputs['input_ids'].shape[1]:]
-        description = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-
-        # Clean up any residual formatting
-        description = description.strip()
-
-        results.append({
-            "frame_number": frame_num,
-            "text": description
-        })
-
-    # Generate embeddings for all descriptions in this batch
-    descriptions = [r["text"] for r in results]
-    embeddings = embedding_model.encode(descriptions, convert_to_numpy=True)
-
-    # Add embeddings to results
-    for i, result in enumerate(results):
-        result["embedding"] = embeddings[i].tolist()
-
-    return results
-
-def save_incremental_json(video_name, all_results, output_dir, is_final=False):
-    """Save results to JSON file incrementally"""
-    output_data = {
-        "video_name": video_name,
-        "total_frames": len(all_results),
-        "frames": sorted(all_results, key=lambda x: x["frame_number"]),
-        "status": "complete" if is_final else "in_progress"
+    ydl_opts = {
+        'format': 'best[ext=mp4]',
+        'outtmpl': os.path.join(output_path, '%(title)s.%(ext)s'),
+        'quiet': False,
+        'no_warnings': False,
     }
 
-    # Use video name (without extension) as JSON filename
-    base_name = Path(video_name).stem
-    json_filename = os.path.join(output_dir, f"{base_name}.json")
-    with open(json_filename, 'w', encoding='utf-8') as f:
-        json.dump(output_data, f, indent=4)
-
-    return json_filename
-
-def cosine_similarity(a, b):
-    """Compute cosine similarity between two vectors"""
-    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
-
-def search_frames(query, json_path, embedding_model, top_k=5):
-    """Search for frames matching the query"""
-    # Load the analysis JSON
-    with open(json_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-
-    # Check if embeddings exist
-    if not data['frames'] or 'embedding' not in data['frames'][0]:
-        raise ValueError("No embeddings found in JSON file.")
-
-    # Embed the query
-    query_embedding = embedding_model.encode(query, convert_to_numpy=True)
-
-    # Compute similarities
-    results = []
-    for frame in data['frames']:
-        frame_embedding = np.array(frame['embedding'])
-        similarity = cosine_similarity(query_embedding, frame_embedding)
-        results.append({
-            'frame_number': frame['frame_number'],
-            'text': frame['text'],
-            'similarity': float(similarity)
-        })
-
-    # Sort by similarity (highest first)
-    results.sort(key=lambda x: x['similarity'], reverse=True)
-    return results[:top_k]
-
-def get_frame_timestamp(frame_number, frame_interval=30, fps=30):
-    """Calculate timestamp for a frame number"""
-    actual_frame_position = (frame_number - 1) * frame_interval
-    return actual_frame_position / fps
-
-def extract_clip(video_path, start_time, end_time, output_path):
-    """Extract a clip from video between start_time and end_time (in seconds)"""
     try:
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            st.error(f"Failed to open video: {video_path}")
-            return False
-
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-        # Ensure dimensions are even (required by some codecs)
-        if width % 2 != 0:
-            width -= 1
-        if height % 2 != 0:
-            height -= 1
-
-        # Try different codecs for better compatibility
-        # Use avc1 (H.264) for better browser compatibility
-        fourcc = cv2.VideoWriter_fourcc(*'avc1')
-        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-
-        if not out.isOpened():
-            # Fallback to mp4v if avc1 fails
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-
-        # Calculate frame numbers
-        start_frame = max(0, int(start_time * fps))
-        end_frame = int(end_time * fps)
-
-        # Set position to start frame
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-
-        frames_written = 0
-        current_frame = start_frame
-        while current_frame <= end_frame:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            # Resize frame if dimensions were adjusted
-            if frame.shape[1] != width or frame.shape[0] != height:
-                frame = cv2.resize(frame, (width, height))
-
-            out.write(frame)
-            frames_written += 1
-            current_frame += 1
-
-        cap.release()
-        out.release()
-
-        if frames_written == 0:
-            st.error(f"No frames extracted. Start: {start_time}s, End: {end_time}s")
-            return False
-
-        # Verify file was created and has size > 0
-        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-            st.error(f"Clip file not created or empty: {output_path}")
-            return False
-
-        return True
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            video_path = ydl.prepare_filename(info)
+            video_title = info.get('title', 'video')
+            return video_path, video_title
     except Exception as e:
-        st.error(f"Error extracting clip: {e}")
-        import traceback
-        st.error(traceback.format_exc())
-        return False
+        st.error(f"Error downloading video: {str(e)}")
+        return None, None
 
-def process_video(video_path, model, processor, embedding_model, video_name, output_dir, batch_size=4, max_workers=2, save_interval=8):
-    """Process video and extract frame descriptions with parallel processing and incremental saving"""
-
-    # Step 1: Extract all frames first
-    status_text = st.empty()
-    status_text.text("📹 Extracting frames from video...")
-
-    frame_interval = 30  # Extract one frame every 30 frames (adjust based on fps)
-    frames_data, fps, total_frames = extract_frames(video_path, frame_interval)
-
-    if frames_data is None:
-        st.error("Error: Could not open video file")
-        return None
-
-    num_frames = len(frames_data)
-    st.info(f"📹 FPS: {fps:.2f}, extracted {num_frames} frames for processing")
-
-    # Step 2: Split frames into batches
-    batches = [frames_data[i:i + batch_size] for i in range(0, num_frames, batch_size)]
-
-    # Progress bar
-    progress_bar = st.progress(0)
-    status_text.text(f"🚀 Processing {num_frames} frames with {max_workers} workers...")
-
-    all_results = []
-    processed_count = 0
-    last_save_count = 0
-
-    # Step 3: Process batches sequentially
-    for batch_idx, batch in enumerate(batches):
-        try:
-            batch_results = process_frame_batch(batch, model, processor, embedding_model)
-            all_results.extend(batch_results)
-            processed_count += len(batch_results)
-
-            # Update progress
-            progress = processed_count / num_frames
-            progress_bar.progress(min(progress, 1.0))
-            status_text.text(f"Processing: {processed_count}/{num_frames} frames complete")
-
-            # Save incrementally every N frames
-            if processed_count - last_save_count >= save_interval:
-                json_filename = save_incremental_json(video_name, all_results, output_dir, is_final=False)
-                last_save_count = processed_count
-                status_text.text(f"Processing: {processed_count}/{num_frames} frames complete | 💾 Saved checkpoint")
-
-        except Exception as e:
-            st.error(f"Error processing batch {batch_idx}: {str(e)}")
-
-    # Final save with complete status
-    json_filename = save_incremental_json(video_name, all_results, output_dir, is_final=True)
-
-    progress_bar.progress(1.0)
-    status_text.text(f"✓ Complete! Analyzed {len(all_results)} frames")
-
-    return all_results, json_filename
 
 def main():
     st.set_page_config(page_title="Semantic Video Search", page_icon="🎬", layout="wide")
 
-    st.title("🎬 Semantic Video Search")
-    st.markdown("Upload a video to generate keywords for each frame")
+    st.title("Semantic Video Search")
 
-    # File uploader
-    uploaded_file = st.file_uploader("Choose a video file", type=['mov', 'mp4', 'avi', 'mkv'])
+    # Initialize session state for YouTube video
+    if 'youtube_video_path' not in st.session_state:
+        st.session_state.youtube_video_path = None
+    if 'youtube_video_name' not in st.session_state:
+        st.session_state.youtube_video_name = None
+    if 'youtube_url' not in st.session_state:
+        st.session_state.youtube_url = ""
+    if 'youtube_url_hash' not in st.session_state:
+        st.session_state.youtube_url_hash = None
 
-    if uploaded_file is not None:
-        # Display video
-        st.video(uploaded_file)
+    # Input method selection
+    input_method = st.radio(
+        "Choose input method:",
+        ["📁 Upload File", "🔗 YouTube URL"],
+        horizontal=True
+    )
+
+    uploaded_file = None
+    video_path_from_youtube = None
+    video_name_from_youtube = None
+
+    if input_method == "📁 Upload File":
+        # File uploader
+        uploaded_file = st.file_uploader("Choose a video file", type=['mov', 'mp4', 'avi', 'mkv'])
+        # Clear YouTube video if switching to file upload
+        if st.session_state.youtube_video_path is not None:
+            st.session_state.youtube_video_path = None
+            st.session_state.youtube_video_name = None
+    else:
+        # YouTube URL input - use session state to persist the URL
+        youtube_url = st.text_input(
+            "Enter YouTube URL:",
+            value=st.session_state.youtube_url,
+            placeholder="https://www.youtube.com/watch?v=...",
+            key="yt_url_input"
+        )
+
+        # Update session state when URL changes
+        if youtube_url != st.session_state.youtube_url:
+            st.session_state.youtube_url = youtube_url
+
+        if youtube_url:
+            # Calculate hash for this URL
+            url_hash = hash_youtube_url(youtube_url)
+
+            # Check if embeddings already exist for this URL
+            output_dir = "video_frames_analysis"
+            os.makedirs(output_dir, exist_ok=True)
+            hash_json_filename = os.path.join(output_dir, f"yt_{url_hash}.json")
+
+            embeddings_exist = os.path.exists(hash_json_filename)
+
+            if embeddings_exist:
+                st.success(f"🎯 Found existing analysis for this YouTube video!")
+                st.info("💡 You can load the existing analysis without re-downloading the video.")
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("📊 Load Existing Analysis", type="primary"):
+                        # Load JSON to get video name
+                        with open(hash_json_filename, 'r', encoding='utf-8') as f:
+                            existing_data = json.load(f)
+
+                        # Set session state as if video was downloaded
+                        st.session_state.youtube_video_name = existing_data.get('video_name', f'YouTube Video {url_hash}')
+                        st.session_state.youtube_url_hash = url_hash
+                        # Note: video_path will be None, but we don't need it for search
+                        st.success("✓ Loaded existing analysis!")
+                        st.rerun()
+
+                with col2:
+                    download_anyway = st.button("🔽 Download Video Anyway")
+            else:
+                download_anyway = st.button("🔽 Download Video", type="primary")
+
+            if embeddings_exist == False and download_anyway or (embeddings_exist and download_anyway):
+                with st.spinner("⏳ Downloading from YouTube..."):
+                    downloaded_path, downloaded_name = download_youtube_video(youtube_url)
+
+                if downloaded_path:
+                    # Store in session state including hash
+                    st.session_state.youtube_video_path = downloaded_path
+                    st.session_state.youtube_video_name = downloaded_name
+                    st.session_state.youtube_url_hash = url_hash
+                    st.success(f"✓ Downloaded: {downloaded_name}")
+                    st.rerun()  # Rerun to update the UI
+
+        # Use session state values - ALWAYS display if available
+        if st.session_state.youtube_video_path or st.session_state.youtube_url_hash:
+            video_path_from_youtube = st.session_state.youtube_video_path
+            video_name_from_youtube = st.session_state.youtube_video_name
+
+            if video_path_from_youtube:
+                st.info(f"📹 Video loaded: {video_name_from_youtube}")
+                st.video(video_path_from_youtube)
+            elif st.session_state.youtube_url_hash:
+                # Embeddings loaded without video file
+                st.info(f"📊 Using existing embeddings: {video_name_from_youtube}")
+                st.info("💡 Video file not downloaded (embeddings only mode)")
+
+    # Determine which video source to use
+    # Video is ready if we have an uploaded file, downloaded YouTube video, OR loaded YouTube embeddings
+    video_ready = (uploaded_file is not None or
+                   video_path_from_youtube is not None or
+                   st.session_state.youtube_url_hash is not None)
+
+    if video_ready:
+        # Set current video name for both sources
+        if uploaded_file is not None:
+            current_video_name = uploaded_file.name
+        else:
+            current_video_name = video_name_from_youtube
+
+        # CPU-only processing (no device selection needed)
+        selected_device_type = "cpu"
 
         # Check if JSON already exists
         output_dir = "video_frames_analysis"
         os.makedirs(output_dir, exist_ok=True)
 
-        base_name = Path(uploaded_file.name).stem
-        json_filename = os.path.join(output_dir, f"{base_name}.json")
+        # For YouTube videos, use URL hash as filename; for uploads, use video name
+        if video_path_from_youtube and st.session_state.youtube_url_hash:
+            json_filename = os.path.join(output_dir, f"yt_{st.session_state.youtube_url_hash}.json")
+        else:
+            base_name = Path(current_video_name).stem
+            json_filename = os.path.join(output_dir, f"{base_name}.json")
+
         json_exists = os.path.exists(json_filename)
 
         if json_exists:
@@ -363,7 +202,12 @@ def main():
             with open(json_filename, 'r', encoding='utf-8') as f:
                 existing_data = json.load(f)
 
-            st.success(f"✓ Found existing analysis: {base_name}.json ({existing_data['total_frames']} frames)")
+            if video_path_from_youtube:
+                st.success(f"✓ Found existing analysis for this YouTube video ({existing_data['total_frames']} frames)")
+                st.info(f"📁 Using cached embeddings: yt_{st.session_state.youtube_url_hash}.json")
+            else:
+                base_name = Path(current_video_name).stem
+                st.success(f"✓ Found existing analysis: {base_name}.json ({existing_data['total_frames']} frames)")
 
             # Show existing results
             with st.expander("📊 View All Frames", expanded=False):
@@ -376,7 +220,7 @@ def main():
 
             # SEARCH INTERFACE
             st.markdown("---")
-            st.header("🔍 Search Video")
+            st.header("Search Video")
 
             col1, col2 = st.columns([3, 1])
             with col1:
@@ -414,16 +258,28 @@ def main():
                     clips_dir = "extracted_clips"
                     os.makedirs(clips_dir, exist_ok=True)
 
-                    video_path = os.path.join(clips_dir, f"temp_{uploaded_file.name}")
-                    if not os.path.exists(video_path):
-                        uploaded_file.seek(0)
-                        with open(video_path, 'wb') as f:
-                            f.write(uploaded_file.read())
+                    # Check if we have access to video file for clip extraction
+                    video_path = None
+                    if video_path_from_youtube:
+                        video_path = video_path_from_youtube
+                    elif uploaded_file:
+                        video_path = os.path.join(clips_dir, f"temp_{uploaded_file.name}")
+                        if not os.path.exists(video_path):
+                            uploaded_file.seek(0)
+                            with open(video_path, 'wb') as f:
+                                f.write(uploaded_file.read())
 
-                    # Get video FPS
-                    cap = cv2.VideoCapture(video_path)
-                    fps = cap.get(cv2.CAP_PROP_FPS)
-                    cap.release()
+                    # Determine if we can extract clips
+                    can_extract_clips = video_path is not None and os.path.exists(video_path)
+
+                    if can_extract_clips:
+                        # Get video FPS
+                        cap = cv2.VideoCapture(video_path)
+                        fps = cap.get(cv2.CAP_PROP_FPS)
+                        cap.release()
+                    else:
+                        st.warning("⚠️ Video file not available - showing search results without video clips")
+                        st.info("💡 To extract clips, download the video first")
 
                     # Display results
                     for i, result in enumerate(results, 1):
@@ -437,49 +293,54 @@ def main():
                                 st.markdown(f"**Description:** {result['text']}")
 
                             with col2:
-                                # Calculate timestamp
+                                # Get timestamp from stored data
                                 frame_timestamp = get_frame_timestamp(
                                     result['frame_number'],
-                                    frame_interval=30,
-                                    fps=fps
+                                    existing_data
                                 )
 
-                                # Calculate clip times
-                                start_time = max(0, frame_timestamp - padding_seconds)
-                                end_time = frame_timestamp + padding_seconds
+                                st.markdown(f"**Timestamp:** {frame_timestamp:.2f}s")
 
-                                st.markdown(f"**Timestamp:** {frame_timestamp:.2f}s (±{padding_seconds}s)")
+                                # Only extract clip if we have video file
+                                if can_extract_clips:
+                                    # Calculate clip times
+                                    start_time = max(0, frame_timestamp - padding_seconds)
+                                    end_time = frame_timestamp + padding_seconds
 
-                                # Extract clip
-                                clip_filename = f"clip_{i}_frame{result['frame_number']}_{query.replace(' ', '_')[:20]}.mp4"
-                                clip_path = os.path.join(clips_dir, clip_filename)
+                                    st.markdown(f"**Clip Range:** {start_time:.2f}s - {end_time:.2f}s")
 
-                                # Show extraction info
-                                with st.spinner(f"Extracting clip {i}..."):
-                                    success = extract_clip(video_path, start_time, end_time, clip_path)
+                                    # Extract clip
+                                    clip_filename = f"clip_{i}_frame{result['frame_number']}_{query.replace(' ', '_')[:20]}.mp4"
+                                    clip_path = os.path.join(clips_dir, clip_filename)
 
-                                if success:
-                                    # Verify clip exists
-                                    if os.path.exists(clip_path):
-                                        file_size = os.path.getsize(clip_path)
-                                        st.success(f"✓ Clip created: {file_size / 1024:.1f} KB")
+                                    # Show extraction info
+                                    with st.spinner(f"Extracting clip {i}..."):
+                                        success = extract_clip(video_path, start_time, end_time, clip_path)
 
-                                        # Display video
-                                        st.video(clip_path)
+                                    if success:
+                                        # Verify clip exists
+                                        if os.path.exists(clip_path):
+                                            file_size = os.path.getsize(clip_path)
+                                            st.success(f"✓ Clip created: {file_size / 1024:.1f} KB")
 
-                                        # Download button
-                                        with open(clip_path, 'rb') as clip_file:
-                                            st.download_button(
-                                                label=f"📥 Download Clip {i}",
-                                                data=clip_file,
-                                                file_name=clip_filename,
-                                                mime="video/mp4",
-                                                key=f"download_{i}"
-                                            )
+                                            # Display video
+                                            st.video(clip_path)
+
+                                            # Download button
+                                            with open(clip_path, 'rb') as clip_file:
+                                                st.download_button(
+                                                    label=f"📥 Download Clip {i}",
+                                                    data=clip_file,
+                                                    file_name=clip_filename,
+                                                    mime="video/mp4",
+                                                    key=f"download_{i}"
+                                                )
+                                        else:
+                                            st.error(f"Clip file not found: {clip_path}")
                                     else:
-                                        st.error(f"Clip file not found: {clip_path}")
+                                        st.error("Failed to extract clip (see errors above)")
                                 else:
-                                    st.error("Failed to extract clip (see errors above)")
+                                    st.info("📹 Video clip not available (embeddings only mode)")
 
                             st.markdown("---")
 
@@ -488,46 +349,55 @@ def main():
 
             # Ask if user wants to re-process
             st.markdown("---")
-            st.warning("⚠️ Want to re-analyze this video?")
+            st.warning("⚠️ Want to re-process this video?")
             reprocess = st.checkbox("Yes, re-process this video")
 
             if not reprocess:
                 st.stop()
 
+
         # Performance settings
         with st.expander("⚙️ Performance Settings"):
+            st.info("ℹ️ Batch size controls checkpoint frequency. Higher values = fewer saves, but all frames are processed individually to save memory.")
+
             col1, col2 = st.columns(2)
             with col1:
                 batch_size = st.slider(
-                    "Batch Size",
+                    "Save Checkpoint Every N Frames",
                     min_value=1,
                     max_value=16,
                     value=4,
-                    help="Number of frames to process in each batch. Higher = more memory usage"
+                    help="How often to save progress. Each frame is processed individually."
                 )
             with col2:
                 max_workers = st.slider(
                     "Worker Threads",
                     min_value=1,
                     max_value=4,
-                    value=2,
-                    help="Number of parallel workers. Note: CPU-only models may not benefit from >2 workers"
+                    value=1,
+                    help="Number of parallel workers (currently not used)"
                 )
+            st.success("✅ CPU-based processing: Each frame processed individually")
 
         # Start button
-        if st.button("🚀 Start Analysis", type="primary"):
-            # Save uploaded file temporarily
-            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
-                tmp_file.write(uploaded_file.read())
-                video_path = tmp_file.name
+        if st.button("🚀 Create Embeddings", type="primary"):
+            # Determine video path
+            if video_path_from_youtube:
+                # Use YouTube video directly
+                video_path = video_path_from_youtube
+            else:
+                # Save uploaded file temporarily
+                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
+                    tmp_file.write(uploaded_file.read())
+                    video_path = tmp_file.name
             # Create output directory
             output_dir = "video_frames_analysis"
             os.makedirs(output_dir, exist_ok=True)
 
             # Load models
-            with st.spinner("Loading vision-language model..."):
-                model, processor = load_model()
-            st.success("✓ VLM loaded!")
+            with st.spinner("Loading vision-language model on CPU..."):
+                model, processor, device_config = load_model(device_type="cpu")
+            st.success("✓ VLM loaded on CPU!")
 
             with st.spinner("Loading embedding model..."):
                 embedding_model = load_embedding_model()
@@ -539,8 +409,9 @@ def main():
                 model,
                 processor,
                 embedding_model,
-                video_name=uploaded_file.name,
+                video_name=current_video_name,
                 output_dir=output_dir,
+                device_config=device_config,
                 batch_size=batch_size,
                 max_workers=max_workers,
                 save_interval=8
@@ -564,7 +435,7 @@ def main():
 
                 # Prepare data for download button
                 output_data = {
-                    "video_name": uploaded_file.name,
+                    "video_name": current_video_name,
                     "total_frames": len(results),
                     "frames": results,
                     "status": "complete"
@@ -576,9 +447,10 @@ def main():
                     file_name="video_analysis.json",
                     mime="application/json"
                 )
-                
-                # Clean up temp file
-                os.unlink(video_path)
+
+                # Clean up temp file (but not YouTube downloads)
+                if not video_path_from_youtube:
+                    os.unlink(video_path)
     
 
 if __name__ == "__main__":
