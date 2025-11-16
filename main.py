@@ -127,7 +127,13 @@ def process_frame_batch(frames_batch, model, processor, embedding_model, previou
         # Move inputs to the same device as model
         inputs = {k: v.to(model.device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
 
-        outputs = model.generate(**inputs, max_new_tokens=128)
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=128,
+            temperature=0.1,
+            min_p=0.15,
+            repetition_penalty=1.05
+        )
 
         # Decode only the generated tokens (not the entire prompt)
         generated_ids = outputs[:, inputs['input_ids'].shape[1]:]
