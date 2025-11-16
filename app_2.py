@@ -728,241 +728,295 @@ def main():
     )
     
     # Custom CSS for minimal B&W design
-    # Replace the CSS section with this updated version:
-
     st.markdown("""
-    <style>
-    /* Main background */
-    .stApp {
-        background-color: #f5f5f5;
-    }
-    
-    /* REMOVE BLACK BAR - Hide header completely */
-    header {
-        visibility: hidden;
-        height: 0;
-        padding: 0;
-        margin: 0;
-    }
-    
-    .main > div {
-        padding-top: 1rem;
-    }
-    
-    /* Remove extra padding */
-    .block-container {
-        padding-top: 1rem;
-        padding-bottom: 2rem;
-        max-width: 1200px;
-    }
+<style>
+/* Main background */
+.stApp {
+    background-color: #f5f5f5;
+}
 
-    
-    /* Subtitle text */
-    .subtitle {
-        text-align: center;
-        color: #666;
-        font-size: 1rem;
-        margin: 1rem 0 2rem 0;
-        font-weight: 400;
-    }
-    
-    /* PROGRESS BAR - Dark text on light background */
-    .stProgress > div > div > div > div {
-        background-color: #4A90E2;
-    }
-    
-    /* Progress text - make it visible */
-    .stProgress {
-        background-color: #e0e0e0;
-    }
-    
-    /* Status text during processing */
-    .element-container div[data-testid="stMarkdownContainer"] p {
-        color: #333;
-    }
-    
-    /* Spinner text */
-    .stSpinner > div {
-        border-top-color: #4A90E2 !important;
-    }
-    
-    .stSpinner > div > div {
-        color: #333 !important;
-    }
-    
-    /* Clean tabs */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 12px;
-        background-color: transparent;
-        padding: 0;
-        border-bottom: none;
-        justify-content: flex-start;
-    }
-    
-    .stTabs [data-baseweb="tab"] {
-        background-color: #ffffff;
-        border-radius: 8px;
-        padding: 12px 24px;
-        border: 1px solid #e0e0e0;
-        color: #333;
-        font-weight: 500;
-        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
-    }
-    
-    .stTabs [aria-selected="true"] {
-        background-color: #4A90E2;
-        color: white;
-        border: 1px solid #4A90E2;
-        box-shadow: 0 4px 8px rgba(74, 144, 226, 0.3);
-    }
-    
-    /* File uploader styling */
-    .stFileUploader {
-        background-color: #2d2d2d;
-        border-radius: 12px;
-        padding: 2rem;
-        border: 2px dashed #555;
-    }
-    
-    .stFileUploader label {
-        color: #ffffff !important;
-    }
-    
-    .stFileUploader [data-testid="stFileUploadDropzone"] {
-        background-color: #2d2d2d;
-    }
-    
-    .stFileUploader [data-testid="stFileUploadDropzone"] section {
-        background-color: #2d2d2d;
-        border: none;
-    }
-    
-    .stFileUploader small {
-        color: #999 !important;
-    }
-    
-    /* Buttons */
-    .stButton button {
-        border-radius: 8px;
-        border: 1px solid #e0e0e0;
-        font-weight: 500;
-        transition: all 0.3s ease;
-    }
-    
-    .stButton button:hover {
-        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
-        transform: translateY(-2px);
-    }
-    
-    /* Primary button */
-    .stButton button[kind="primary"] {
-        background-color: #4A90E2;
-        color: white;
-        border: none;
-    }
-    
-    /* Radio buttons */
-    .stRadio > label {
-        font-weight: 500;
-        color: #333;
-    }
-    
-    .stRadio [role="radiogroup"] {
-        gap: 1rem;
-    }
-    
-    /* Input fields */
-    .stTextInput input, .stNumberInput input {
-        border-radius: 8px;
-        border: 1px solid #e0e0e0;
-        background-color: #ffffff;
-    }
-    
-    /* Metrics */
-    [data-testid="stMetricValue"] {
-        font-size: 1.5rem;
-        color: #2c3e50;
-        font-weight: 600;
-    }
-    
-    [data-testid="stMetricLabel"] {
-        color: #666;
-        font-size: 0.9rem;
-    }
-    
-    /* Expanders */
-    .streamlit-expanderHeader {
-        background-color: #ffffff;
-        border-radius: 8px;
-        border: 1px solid #e0e0e0;
-        font-weight: 500;
-        color: #333;
-    }
-    
-    /* Frame display */
-    .frame-item {
-        background-color: #ffffff;
-        padding: 12px 16px;
-        border-radius: 8px;
-        margin-bottom: 8px;
-        border-left: 3px solid #4A90E2;
-        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
-    }
-    
-    /* Chat messages */
-    .stChatMessage {
-        background-color: #ffffff;
-        border-radius: 8px;
-        padding: 1rem;
-        margin: 0.5rem 0;
-        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
-    }
-    
-    /* Video container */
-    .video-container {
-        border-radius: 12px;
-        overflow: hidden;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-        margin: 1rem 0;
-    }
-    
-    /* Info/Success/Warning boxes */
-    .stAlert {
-        border-radius: 8px;
-        border-left: 4px solid #4A90E2;
-        background-color: #ffffff;
-    }
-    
-    /* Success message */
-    .element-container:has(.stSuccess) {
-        color: #2d862d;
-    }
-    
-    /* Info message */
-    .element-container:has(.stInfo) {
-        color: #333;
-    }
-    
-    /* Download button */
-    .stDownloadButton button {
-        background-color: #2d2d2d;
-        color: white;
-        border: none;
-        font-weight: 500;
-    }
-    
-    /* Checkbox */
-    .stCheckbox {
-        color: #333;
-    }
-    
-    /* Select box */
-    .stSelectbox label {
-        color: #333;
-    }
-    </style>
+/* REMOVE BLACK BAR - Hide header completely */
+header {
+    visibility: hidden;
+    height: 0;
+    padding: 0;
+    margin: 0;
+}
+
+.main > div {
+    padding-top: 1rem;
+}
+
+/* Remove extra padding */
+.block-container {
+    padding-top: 1rem;
+    padding-bottom: 2rem;
+    max-width: 1200px;
+}
+
+/* PROGRESS BAR - Dark text on light background */
+.stProgress > div > div > div > div {
+    background-color: #4A90E2;
+}
+
+/* Progress text - make it visible */
+.stProgress {
+    background-color: #e0e0e0;
+}
+
+/* Status text during processing */
+.element-container div[data-testid="stMarkdownContainer"] p {
+    color: #333;
+}
+
+/* Spinner text */
+.stSpinner > div {
+    border-top-color: #4A90E2 !important;
+}
+
+.stSpinner > div > div {
+    color: #333 !important;
+}
+
+/* Clean tabs - EQUALLY SPACED */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 12px;
+    background-color: transparent;
+    padding: 0;
+    border-bottom: none;
+    justify-content: space-evenly;
+}
+
+.stTabs [data-baseweb="tab"] {
+    background-color: #ffffff;
+    border-radius: 8px;
+    padding: 12px 24px;
+    border: 1px solid #e0e0e0;
+    color: #333;
+    font-weight: 500;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+    min-width: 200px;
+}
+
+.stTabs [aria-selected="true"] {
+    background-color: #4A90E2;
+    color: white;
+    border: 1px solid #4A90E2;
+    box-shadow: 0 4px 8px rgba(74, 144, 226, 0.3);
+}
+
+/* File uploader styling */
+.stFileUploader {
+    background-color: #2d2d2d;
+    border-radius: 12px;
+    padding: 2rem;
+    border: 2px dashed #555;
+}
+
+.stFileUploader label {
+    color: #ffffff !important;
+}
+
+.stFileUploader [data-testid="stFileUploadDropzone"] {
+    background-color: #2d2d2d;
+}
+
+.stFileUploader [data-testid="stFileUploadDropzone"] section {
+    background-color: #2d2d2d;
+    border: none;
+}
+
+.stFileUploader small {
+    color: #999 !important;
+}
+
+/* Buttons */
+.stButton button {
+    border-radius: 8px;
+    border: 1px solid #e0e0e0;
+    font-weight: 500;
+    transition: all 0.3s ease;
+}
+
+.stButton button:hover {
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+    transform: translateY(-2px);
+}
+
+/* Primary button */
+.stButton button[kind="primary"] {
+    background-color: #4A90E2;
+    color: white;
+    border: none;
+}
+
+/* Radio buttons */
+.stRadio > label {
+    font-weight: 500;
+    color: #333;
+}
+
+.stRadio [role="radiogroup"] {
+    gap: 1rem;
+}
+
+/* Input fields - BLACK TEXT */
+.stTextInput input, .stNumberInput input {
+    border-radius: 8px;
+    border: 1px solid #e0e0e0;
+    background-color: #ffffff;
+    color: #000000 !important;
+    font-size: 1rem;
+}
+
+/* Placeholder text - gray */
+.stTextInput input::placeholder {
+    color: #999 !important;
+}
+
+/* Text area - BLACK TEXT */
+.stTextArea textarea {
+    color: #000000 !important;
+    background-color: #ffffff;
+    border-radius: 8px;
+    border: 1px solid #e0e0e0;
+}
+
+.stTextArea textarea::placeholder {
+    color: #999 !important;
+}
+
+/* Select box - BLACK TEXT */
+.stSelectbox div[data-baseweb="select"] > div {
+    color: #000000 !important;
+    background-color: #ffffff;
+    border-radius: 8px;
+    border: 1px solid #e0e0e0;
+}
+
+.stSelectbox [data-baseweb="select"] {
+    background-color: #ffffff;
+}
+
+.stSelectbox label {
+    color: #333;
+    font-weight: 500;
+}
+
+/* Dropdown menu items - BLACK TEXT */
+[role="listbox"] [role="option"] {
+    color: #000000 !important;
+}
+
+/* Metrics */
+[data-testid="stMetricValue"] {
+    font-size: 1.5rem;
+    color: #2c3e50;
+    font-weight: 600;
+}
+
+[data-testid="stMetricLabel"] {
+    color: #666;
+    font-size: 0.9rem;
+}
+
+/* Expanders */
+.streamlit-expanderHeader {
+    background-color: #ffffff;
+    border-radius: 8px;
+    border: 1px solid #e0e0e0;
+    font-weight: 500;
+    color: #333;
+}
+
+.streamlit-expanderContent {
+    background-color: #ffffff;
+    border: 1px solid #e0e0e0;
+    border-top: none;
+    border-radius: 0 0 8px 8px;
+}
+
+/* Frame display */
+.frame-item {
+    background-color: #ffffff;
+    padding: 12px 16px;
+    border-radius: 8px;
+    margin-bottom: 8px;
+    border-left: 3px solid #4A90E2;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+/* Chat messages */
+.stChatMessage {
+    background-color: #ffffff;
+    border-radius: 8px;
+    padding: 1rem;
+    margin: 0.5rem 0;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+/* Video container */
+.video-container {
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    margin: 1rem 0;
+}
+
+/* Info/Success/Warning boxes */
+.stAlert {
+    border-radius: 8px;
+    border-left: 4px solid #4A90E2;
+    background-color: #ffffff;
+}
+
+/* Success message */
+.element-container:has(.stSuccess) {
+    color: #2d862d;
+}
+
+/* Info message */
+.element-container:has(.stInfo) {
+    color: #333;
+}
+
+/* Download button */
+.stDownloadButton button {
+    background-color: #2d2d2d;
+    color: white;
+    border: none;
+    font-weight: 500;
+}
+
+.stDownloadButton button:hover {
+    background-color: #1a1a1a;
+}
+
+/* Checkbox */
+.stCheckbox {
+    color: #333;
+}
+
+.stCheckbox label {
+    color: #333 !important;
+}
+
+/* Slider */
+.stSlider {
+    color: #333;
+}
+
+[data-testid="stSlider"] label {
+    color: #333;
+}
+
+/* Caption text */
+.caption {
+    color: #666 !important;
+}
+</style>
 """, unsafe_allow_html=True)
-    # Header with title on black bar and Lottie animation below
+    # Header with title on black bar
     st.markdown("""
     <div style="background-color: #1a1a1a; padding: 1.5rem 2rem; border-radius: 12px; margin: 0 auto 1rem auto; max-width: 600px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
         <h1 style="text-align: center; color: #ffffff; margin: 0; font-size: 2rem; font-weight: 600; letter-spacing: 2px;">
@@ -970,14 +1024,13 @@ def main():
         </h1>
     </div>
 """, unsafe_allow_html=True)
-    # Header with centered Lottie animation
+    
+    # Lottie animation below
     lottie_animation = load_lottiefile("Animation.json")
     if lottie_animation:
-        st.markdown('<div class="animation-box" style="margin-top: 0.5rem;">', unsafe_allow_html=True)
         col1, col2, col3 = st.columns([1, 3, 1])
         with col2:
             st_lottie(lottie_animation, height=180, key="header_animation")
-        st.markdown('</div>', unsafe_allow_html=True)
     
     # Initialize session state
     if 'video_data' not in st.session_state:
@@ -991,8 +1044,8 @@ def main():
     if 'video_file_path' not in st.session_state:
         st.session_state.video_file_path = None
     
-    # Create tabs with icons
-    tab1, tab2, tab3 = st.tabs(["📹 Analyze Video", "🔍 Search & Clips", "💬 Chat"])
+    # Create tabs - ONLY 2 TABS
+    tab1, tab2 = st.tabs(["📹 Analyze Video", "🔍 Search & Clips"])
     
     # =========================================================================
     # TAB 1: VIDEO ANALYSIS
@@ -1118,7 +1171,7 @@ def main():
                         use_container_width=True
                     )
                 
-                st.info("✨ Navigate to **Search & Clips** or **Chat** tabs to interact with your analyzed video!")
+                st.info("✨ Navigate to **Search & Clips** tab to search and extract video clips!")
     
     # =========================================================================
     # TAB 2: SEARCH & CLIPS
@@ -1290,184 +1343,6 @@ def main():
                                     )
                                 
                                 st.markdown("---")
-    
-    # =========================================================================
-    # TAB 3: CHAT
-    # =========================================================================
-    with tab3:
-        # Load existing analysis
-        with st.expander("📂 Load Previous Analysis"):
-            uploaded_json_chat = st.file_uploader("Upload JSON", type=['json'], key="json_uploader_chat", label_visibility="collapsed")
-            if uploaded_json_chat:
-                loaded_data = json.load(uploaded_json_chat)
-                st.session_state.video_data = loaded_data
-                if 'video_path' in loaded_data and os.path.exists(loaded_data['video_path']):
-                    st.session_state.video_file_path = loaded_data['video_path']
-                st.success(f"✓ Loaded: {loaded_data['video_name']}")
-        
-        if st.session_state.video_data is None:
-            st.info("👆 Please analyze a video in the **Analyze Video** tab or load an existing JSON file above")
-        else:
-            st.markdown(f"**📹 {st.session_state.video_data['video_name']}** • {st.session_state.video_data['total_frames']} frames")
-            
-            if 'text_model' not in st.session_state:
-                with st.spinner("Loading chat models..."):
-                    text_model, text_tokenizer = load_text_model()
-                    st.session_state.text_model = text_model
-                    st.session_state.text_tokenizer = text_tokenizer
-            
-            st.markdown("---")
-            
-            # Clip selection
-            st.markdown("### 🎬 Select Video Clip")
-            
-            frames = st.session_state.video_data['frames']
-            max_time = max([f['timestamp_seconds'] for f in frames])
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                start_time = st.number_input("Start (seconds)", 0.0, max_time, 0.0, 1.0)
-            
-            with col2:
-                clip_duration = st.number_input("Duration (seconds)", 5.0, 30.0, 10.0, 1.0)
-            
-            with col3:
-                end_time = min(start_time + clip_duration, max_time)
-                st.metric("End Time", f"{end_time:.1f}s")
-            
-            frames_in_window = len([f for f in frames if start_time <= f['timestamp_seconds'] <= end_time])
-            st.caption(f"📊 {frames_in_window} frames in this clip")
-            
-            # Quick presets
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                if st.button("⏮️ Beginning", use_container_width=True):
-                    st.session_state.current_clip_time = (0.0, 10.0)
-                    st.session_state.clip_chat_history = []
-                    st.rerun()
-            
-            with col2:
-                mid = max_time / 2
-                if st.button("⏸️ Middle", use_container_width=True):
-                    st.session_state.current_clip_time = (mid - 5, mid + 5)
-                    st.session_state.clip_chat_history = []
-                    st.rerun()
-            
-            with col3:
-                if st.button("⏭️ End", use_container_width=True):
-                    st.session_state.current_clip_time = (max(0, max_time - 10), max_time)
-                    st.session_state.clip_chat_history = []
-                    st.rerun()
-            
-            with col4:
-                if st.button("✓ Load Clip", type="primary", use_container_width=True):
-                    st.session_state.current_clip_time = (start_time, end_time)
-                    st.session_state.clip_chat_history = []
-                    st.rerun()
-            
-            # Show clip and chat
-            if st.session_state.current_clip_time:
-                clip_start, clip_end = st.session_state.current_clip_time
-                
-                st.markdown("---")
-                st.markdown(f"### 🎥 Current Clip: {clip_start:.1f}s - {clip_end:.1f}s")
-                
-                # Show video
-                if st.session_state.video_file_path and os.path.exists(st.session_state.video_file_path):
-                    clips_dir = "extracted_clips"
-                    os.makedirs(clips_dir, exist_ok=True)
-                    
-                    clip_filename = f"clip_{clip_start:.0f}_{clip_end:.0f}.mp4"
-                    clip_path = os.path.join(clips_dir, clip_filename)
-                    
-                    with st.spinner("Loading clip..."):
-                        success = extract_video_clip(
-                            st.session_state.video_file_path,
-                            clip_start,
-                            clip_end,
-                            clip_path
-                        )
-                    
-                    if success:
-                        col1, col2, col3 = st.columns([1, 3, 1])
-                        with col2:
-                            st.markdown('<div class="video-container">', unsafe_allow_html=True)
-                            st.video(clip_path)
-                            st.markdown('</div>', unsafe_allow_html=True)
-                
-                # Frame descriptions
-                clip_frames = [f for f in frames if clip_start <= f['timestamp_seconds'] <= clip_end]
-                
-                with st.expander(f"📝 {len(clip_frames)} Frame Descriptions"):
-                    for frame in clip_frames:
-                        st.markdown(f"**{frame['timestamp_formatted']}** • {frame['description']}")
-                
-                st.markdown("---")
-                
-                # Chat interface
-                st.markdown("### 💬 Ask Questions About This Clip")
-                
-                with st.expander("💡 Example Questions"):
-                    st.markdown("""
-                    - How is this problem solved?
-                    - Generate 4 similar questions
-                    - Explain this step-by-step
-                    - Create practice problems like this
-                    """)
-                
-                # Display chat history
-                for chat in st.session_state.clip_chat_history:
-                    with st.chat_message("user"):
-                        st.write(chat["question"])
-                    with st.chat_message("assistant"):
-                        st.markdown(chat["answer"])
-                
-                # Chat input
-                user_question = st.chat_input(f"Ask about {clip_start:.1f}s-{clip_end:.1f}s...")
-                
-                if user_question:
-                    with st.chat_message("user"):
-                        st.write(user_question)
-                    
-                    history_str = ""
-                    for chat in st.session_state.clip_chat_history:
-                        history_str += f"USER: {chat['question']}\nASSISTANT: {chat['answer']}\n\n"
-                    
-                    with st.chat_message("assistant"):
-                        with st.spinner("Thinking..."):
-                            answer = chat_with_video_clip(
-                                user_question,
-                                st.session_state.video_data,
-                                st.session_state.text_model,
-                                st.session_state.text_tokenizer,
-                                clip_start,
-                                clip_end,
-                                history_str
-                            )
-                        st.markdown(answer)
-                    
-                    st.session_state.clip_chat_history.append({
-                        "question": user_question,
-                        "answer": answer
-                    })
-                
-                # Action buttons
-                st.markdown("---")
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button("🗑️ Clear Chat History", use_container_width=True):
-                        st.session_state.clip_chat_history = []
-                        st.rerun()
-                with col2:
-                    if st.button("🔄 Select Different Clip", use_container_width=True):
-                        st.session_state.current_clip_time = None
-                        st.session_state.clip_chat_history = []
-                        st.rerun()
-            
-            else:
-                st.info("👆 Select a time range and load a clip to start chatting!")
 
 
 if __name__ == "__main__":
