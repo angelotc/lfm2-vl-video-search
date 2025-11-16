@@ -19,15 +19,37 @@ pip install -r requirements.txt
 ### Running the Applications
 ```bash
 streamlit run app.py   # Basic video upload UI (no AI processing)
-streamlit run main.py  # Full video frame analyzer with LFM2-VL model
+streamlit run main.py  # Full video analyzer with search & clip extraction
 ```
 
 Both apps will open in the browser at `http://localhost:8501`
 
-### Required Dependencies
-The current `requirements.txt` is incomplete. Full dependencies needed:
+**Key Features in `main.py`:**
+- Auto-detects if video already has JSON analysis (e.g., `wisconsin-vs-montana-clip.json`)
+- If analysis exists: shows search interface immediately
+- If not: runs VLM analysis first, then shows search
+- Search returns clips with ±2s padding and similarity scores
+
+### Searching Video Content
+
+**Option 1: Use the Streamlit UI (Recommended)**
+1. Run `streamlit run main.py`
+2. Upload video (auto-checks for existing JSON)
+3. Enter search query (e.g., "layup", "person jumping")
+4. View results with similarity scores and downloadable clips
+
+**Option 2: Use CLI search script**
 ```bash
-pip install streamlit transformers torch opencv-python pillow accelerate numpy
+python search.py "layup"                           # Find frames matching "layup"
+python search.py "person jumping" --top-k 10       # Get top 10 results
+python search.py "basketball shot" --json-file path/to/custom_analysis.json
+```
+Note: CLI shows text results only, no clip extraction
+
+### Required Dependencies
+All dependencies are now in `requirements.txt`:
+```bash
+pip install streamlit transformers torch opencv-python pillow accelerate numpy sentence-transformers
 ```
 
 ## Architecture
@@ -38,28 +60,53 @@ pip install streamlit transformers torch opencv-python pillow accelerate numpy
   - Video preview and metadata display
   - Save videos to `uploads/` directory
 
-- **`main.py`**: Core semantic video processing application
+- **`main.py`**: Core semantic video processing and search application
+  - Auto-detects existing JSON analysis by video filename
   - Temporal frame extraction (before, current, after frames)
   - VLM-based action/movement description generation
+  - Text embedding generation using sentence-transformers
   - Sequential batch processing with incremental saves
-  - JSON output with frame-level annotations
+  - JSON output with frame-level annotations and embeddings (saved as `videoname.json`)
+  - Integrated search interface with query input
+  - Clip extraction with configurable padding (±2s default)
+  - Results display with similarity scores and downloadable clips
   - Progress tracking and visualization
+
+- **`search.py`**: Semantic search CLI for querying video frames
+  - Loads embeddings from analysis JSON
+  - Embeds text queries using same model
+  - Computes cosine similarity to find matching frames
+  - Returns top-k results with similarity scores
 
 - **`uploads/`**: Directory for saved uploaded videos (auto-created)
 
 - **`video_frames_analysis/`**: Output directory for analysis results (auto-created)
+  - JSON files named after videos: `{video_basename}.json`
+  - Example: `wisconsin-vs-montana-clip.mp4` → `wisconsin-vs-montana-clip.json`
+
+- **`extracted_clips/`**: Output directory for search result clips (auto-created)
+  - Generated when searching through main.py
+  - Clips named: `clip_{rank}_frame{number}_{query}.mp4`
 
 ### Core Processing Flow (main.py)
 
 1. **Video Upload**: User uploads video via Streamlit file uploader
-2. **Performance Configuration**: User sets batch size and worker threads
+2. **JSON Detection**: Automatically checks for existing analysis
+   - Looks for `{video_basename}.json` in `video_frames_analysis/` folder
+   - Example: `wisconsin-vs-montana-clip.mp4` → looks for `wisconsin-vs-montana-clip.json`
+   - If found: Shows search interface immediately (skip to step 7)
+   - If not found: Proceeds to analysis (steps 3-6)
+3. **Performance Configuration**: User sets batch size and worker threads (if analyzing)
    - Batch size: 1-16 frames per batch (default: 4)
    - Worker threads: 1-4 (displayed for reference, currently uses sequential processing)
-3. **Model Loading**: Cached loading of LFM2-VL model
-   - Model: `LiquidAI/LFM2-VL-450M` from HuggingFace (configurable)
-   - Device: CPU with bfloat16 precision
-   - Manual device management (no device_map="auto")
-4. **Temporal Frame Extraction** (Phase 1):
+4. **Model Loading**: Cached loading of both models (if analyzing)
+   - **VLM**: `LiquidAI/LFM2-VL-450M` from HuggingFace (configurable)
+     - Device: CPU with bfloat16 precision
+     - Manual device management (no device_map="auto")
+   - **Embedding Model**: `sentence-transformers/all-MiniLM-L6-v2` (configurable)
+     - Used to embed text descriptions for semantic search
+     - Lightweight model (~90MB) with 384-dimensional embeddings
+5. **Temporal Frame Extraction** (Phase 1):
    - Extract ALL frames into memory buffer using OpenCV
    - For each sampled frame (every 30 frames), create temporal window:
      - Frame N-1: 15 frames before current (or earliest available)
@@ -67,7 +114,7 @@ pip install streamlit transformers torch opencv-python pillow accelerate numpy
      - Frame N+1: 15 frames after current (or latest available)
    - Convert BGR to RGB for model compatibility
    - Store as triplets of PIL Images
-5. **Sequential VLM Processing** (Phase 2):
+6. **Sequential VLM Processing & Embedding** (Phase 2):
    - Split temporal frame triplets into batches
    - Process batches sequentially (not parallel)
    - For each triplet, apply multi-image chat template:
@@ -76,14 +123,27 @@ pip install streamlit transformers torch opencv-python pillow accelerate numpy
      - Model analyzes temporal context to identify motion
    - Generate description with max 128 new tokens
    - Extract only new tokens (not prompt) from output
-6. **Incremental Saving & Output Generation**:
+   - **Batch embed all descriptions**: After generating text for the batch, encode all descriptions using sentence-transformers
+   - Store 384-dimensional embedding vectors alongside text
+7. **Incremental Saving & Output Generation**:
    - Save JSON checkpoint every 8 processed frames
    - Results auto-sorted by frame number before each save
    - Intermediate saves marked with `"status": "in_progress"`
    - Final save marked with `"status": "complete"`
-   - Output file: `video_frames_analysis/video_analysis.json`
-   - Format: `{video_name, total_frames, frames: [{frame_number, text}], status}`
-   - Display results in-app and provide JSON download
+   - Output file: `video_frames_analysis/{video_basename}.json`
+   - Format: `{video_name, total_frames, frames: [{frame_number, text, embedding}], status}`
+8. **Search Interface** (shown if JSON exists OR after analysis completes):
+   - Query input box for text search
+   - Top-k slider (1-20 results, default: 5)
+   - Padding configuration (0-5 seconds, default: 2s)
+   - Loads embedding model and computes cosine similarity
+   - Displays results with:
+     - Similarity score
+     - Frame description
+     - Timestamp (calculated from frame number and FPS)
+     - Extracted video clip with padding
+     - Download button for each clip
+   - Saves clips to `extracted_clips/` directory
 
 ### Key Components
 
@@ -140,8 +200,16 @@ pip install streamlit transformers torch opencv-python pillow accelerate numpy
   "total_frames": 120,
   "status": "complete",
   "frames": [
-    {"frame_number": 1, "text": "person walking, outdoor scene, daytime"},
-    {"frame_number": 2, "text": "building, street, cars parked"}
+    {
+      "frame_number": 1,
+      "text": "person jumping to shoot basketball into hoop",
+      "embedding": [0.123, -0.456, 0.789, ... ]  // 384-dimensional vector
+    },
+    {
+      "frame_number": 2,
+      "text": "player running down court with ball",
+      "embedding": [-0.234, 0.567, -0.890, ... ]
+    }
   ]
 }
 ```
@@ -149,6 +217,8 @@ pip install streamlit transformers torch opencv-python pillow accelerate numpy
 The `status` field will be:
 - `"in_progress"` during processing (incremental saves)
 - `"complete"` when all frames are processed
+
+The `embedding` field contains a 384-dimensional vector (as a list of floats) that represents the semantic meaning of the text description. This enables similarity search via cosine distance.
 
 ## Important Implementation Details
 
@@ -181,51 +251,82 @@ The `status` field will be:
   - Scene transitions: "Describe how the scene changed from before to after"
 
 ### Performance Considerations
-- **First run**: Model download from HuggingFace (~3.2GB for LFM2-VL-450M)
+- **First run**: Model download from HuggingFace (~3.2GB for LFM2-VL-450M + ~90MB for embedding model)
 - **GPU NOT supported**: Currently hardcoded to CPU device
 - **Memory usage**:
-  - Model requires ~4GB RAM minimum
+  - VLM requires ~4GB RAM minimum
+  - Embedding model: ~90MB
   - Video frames: ALL frames loaded into memory (can be large for long videos)
   - Each sampled frame creates 3 PIL Images (triplet)
-- **Caching**: Streamlit caches model between reruns but not between sessions
+  - Embeddings add ~1.5KB per frame (384 floats × 4 bytes)
+- **Caching**: Streamlit caches both models between reruns but not between sessions
 - **Device handling**: Fixed to CPU with bfloat16 precision (no automatic detection)
 - **Processing time**: Expect 5-15 seconds per frame triplet on CPU
 
-## Extension Points for Semantic Search
+### Semantic Search Implementation
 
-To build a complete semantic search system, the following components are needed:
+**How it Works (search.py)**
+1. Load the `video_analysis.json` file containing frame descriptions and embeddings
+2. Load the same sentence-transformers model used during analysis
+3. Embed the query text (e.g., "layup") into a 384-dimensional vector
+4. Compute cosine similarity between query embedding and all frame embeddings
+5. Return top-k frames with highest similarity scores
 
-### 1. Embedding Generation
-- Replace keyword descriptions with vector embeddings
-- Use VLM's hidden states or separate embedding model (e.g., CLIP)
-- Store frame embeddings in vector database
+**Embedding Model Choice**
+- Uses `sentence-transformers/all-MiniLM-L6-v2` by default
+- Lightweight (90MB), fast, good semantic understanding
+- 384-dimensional embeddings balance quality and storage
+- **IMPORTANT**: Query must use the same model as analysis to ensure embeddings are in the same vector space
 
-### 2. Vector Storage
-- ChromaDB, Pinecone, or FAISS for similarity search
-- Index: video_id + frame_number + embedding vector
-- Metadata: timestamp, video_name, original text description
+**Search Quality**
+- Works well for action/movement queries matching the prompt style
+- Examples of good queries: "layup", "person jumping", "basketball shot", "running with ball"
+- Text-to-text matching: Query is compared to generated descriptions, not raw images
+- Advantages: Fast, efficient, works on CPU
+- Limitations: Search quality depends on VLM's description quality
 
-### 3. Search Interface
-- Text-to-frame: Encode search query → find nearest embeddings
-- Frame-to-frame: Upload reference image → find similar frames
-- Temporal search: Find sequences matching criteria
+**Alternative Approaches (Not Implemented)**
+- CLIP-based search: Use CLIP to embed both frames and queries directly (better cross-modal alignment)
+- Hybrid search: Combine text similarity with temporal/spatial features
+- Query expansion: Use VLM to expand short queries into detailed descriptions
 
-### 4. Result Presentation
-- Display matching frames with timestamps
+## Extension Points for Future Development
+
+The basic semantic search is now implemented. Additional features that could be added:
+
+### 1. Vector Database Integration
+- ✅ **DONE**: Text embeddings stored in JSON
+- 🔄 **Enhancement**: Move to ChromaDB, Pinecone, or FAISS for faster similarity search
+- Benefits: Faster queries, better scaling to multiple videos, filtering capabilities
+
+### 2. Multi-Video Search
+- Index embeddings from multiple videos
+- Search across entire video library
+- Video-level and frame-level results
+
+### 3. Advanced Search Features
+- Frame-to-frame: Upload reference image → find similar frames using CLIP
+- Temporal search: Find sequences matching criteria (e.g., "shot followed by celebration")
+- Filters: Search within specific videos, time ranges, or frame types
+
+### 4. Better Result Presentation
+- ✅ **DONE**: CLI shows top-k results with similarity scores
+- 🔄 **Enhancement**: Web UI for search results
+- Display matching frames as thumbnails with timestamps
 - Generate video clips around matches
-- Relevance scoring and ranking
+- Timeline view showing match distribution
 
 ## Current Limitations
 
-- **No semantic search implemented**: Only generates descriptions, no search capability
-- **No embeddings**: Text descriptions are not vectorized
-- **No indexing**: Results stored as flat JSON files
+- **Basic search only**: CLI-based search, no web UI or advanced features
+- **Single video search**: Cannot search across multiple videos at once
+- **No vector database**: Embeddings stored in JSON, slow for large datasets
+- **Text-based search only**: No image-to-frame search capability
 - **GPU not utilized**: Hardcoded to CPU device, no CUDA support
 - **Fixed prompting**: Single hardcoded prompt for all frames
 - **Memory intensive**: ALL video frames loaded into memory at once
 - **Worker setting unused**: UI shows worker threads but processing is sequential
 - **Single video at a time**: No batch video processing
-- **Incomplete requirements.txt**: Missing several critical dependencies (torch, opencv-python, pillow, accelerate, numpy)
 
 ## Key Architectural Differences from Initial Design
 
@@ -236,3 +337,5 @@ The codebase has evolved significantly. Important changes to be aware of:
 3. **Prompt Focus**: Changed from keyword extraction to action/movement detection
 4. **Device Handling**: Changed from auto-detection to hardcoded CPU
 5. **Memory Strategy**: ALL frames now buffered in memory (two-pass extraction)
+6. **Embeddings Added**: Now generates and stores 384-dimensional embeddings for semantic search
+7. **Search Capability**: Added CLI search tool for querying frames by text

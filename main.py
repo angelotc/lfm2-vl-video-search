@@ -8,6 +8,8 @@ import tempfile
 import torch
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
+from sentence_transformers import SentenceTransformer
+from pathlib import Path
 
 @st.cache_resource
 def load_model(model_id="LiquidAI/LFM2-VL-450M"):
@@ -23,6 +25,12 @@ def load_model(model_id="LiquidAI/LFM2-VL-450M"):
 
     processor = AutoProcessor.from_pretrained(model_id)
     return model, processor
+
+@st.cache_resource
+def load_embedding_model(model_id="sentence-transformers/all-MiniLM-L6-v2"):
+    """Load the sentence transformer model for embedding text descriptions"""
+    embedding_model = SentenceTransformer(model_id)
+    return embedding_model
 
 def extract_frames(video_path, frame_interval):
     """Extract frames from video at specified interval, with temporal context frames"""
@@ -77,7 +85,7 @@ def extract_frames(video_path, frame_interval):
 
     return frames_data, fps, total_frames
 
-def process_frame_batch(frames_batch, model, processor, previous_descriptions=None):
+def process_frame_batch(frames_batch, model, processor, embedding_model, previous_descriptions=None):
     """Process a batch of frames with the model, using temporal context"""
     if not frames_batch:
         return []
@@ -133,6 +141,14 @@ def process_frame_batch(frames_batch, model, processor, previous_descriptions=No
             "text": description
         })
 
+    # Generate embeddings for all descriptions in this batch
+    descriptions = [r["text"] for r in results]
+    embeddings = embedding_model.encode(descriptions, convert_to_numpy=True)
+
+    # Add embeddings to results
+    for i, result in enumerate(results):
+        result["embedding"] = embeddings[i].tolist()
+
     return results
 
 def save_incremental_json(video_name, all_results, output_dir, is_final=False):
@@ -144,13 +160,121 @@ def save_incremental_json(video_name, all_results, output_dir, is_final=False):
         "status": "complete" if is_final else "in_progress"
     }
 
-    json_filename = os.path.join(output_dir, "video_analysis.json")
+    # Use video name (without extension) as JSON filename
+    base_name = Path(video_name).stem
+    json_filename = os.path.join(output_dir, f"{base_name}.json")
     with open(json_filename, 'w', encoding='utf-8') as f:
         json.dump(output_data, f, indent=4)
 
     return json_filename
 
-def process_video(video_path, model, processor, video_name, output_dir, batch_size=4, max_workers=2, save_interval=8):
+def cosine_similarity(a, b):
+    """Compute cosine similarity between two vectors"""
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+
+def search_frames(query, json_path, embedding_model, top_k=5):
+    """Search for frames matching the query"""
+    # Load the analysis JSON
+    with open(json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    # Check if embeddings exist
+    if not data['frames'] or 'embedding' not in data['frames'][0]:
+        raise ValueError("No embeddings found in JSON file.")
+
+    # Embed the query
+    query_embedding = embedding_model.encode(query, convert_to_numpy=True)
+
+    # Compute similarities
+    results = []
+    for frame in data['frames']:
+        frame_embedding = np.array(frame['embedding'])
+        similarity = cosine_similarity(query_embedding, frame_embedding)
+        results.append({
+            'frame_number': frame['frame_number'],
+            'text': frame['text'],
+            'similarity': float(similarity)
+        })
+
+    # Sort by similarity (highest first)
+    results.sort(key=lambda x: x['similarity'], reverse=True)
+    return results[:top_k]
+
+def get_frame_timestamp(frame_number, frame_interval=30, fps=30):
+    """Calculate timestamp for a frame number"""
+    actual_frame_position = (frame_number - 1) * frame_interval
+    return actual_frame_position / fps
+
+def extract_clip(video_path, start_time, end_time, output_path):
+    """Extract a clip from video between start_time and end_time (in seconds)"""
+    try:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            st.error(f"Failed to open video: {video_path}")
+            return False
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        # Ensure dimensions are even (required by some codecs)
+        if width % 2 != 0:
+            width -= 1
+        if height % 2 != 0:
+            height -= 1
+
+        # Try different codecs for better compatibility
+        # Use avc1 (H.264) for better browser compatibility
+        fourcc = cv2.VideoWriter_fourcc(*'avc1')
+        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+
+        if not out.isOpened():
+            # Fallback to mp4v if avc1 fails
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+
+        # Calculate frame numbers
+        start_frame = max(0, int(start_time * fps))
+        end_frame = int(end_time * fps)
+
+        # Set position to start frame
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+        frames_written = 0
+        current_frame = start_frame
+        while current_frame <= end_frame:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # Resize frame if dimensions were adjusted
+            if frame.shape[1] != width or frame.shape[0] != height:
+                frame = cv2.resize(frame, (width, height))
+
+            out.write(frame)
+            frames_written += 1
+            current_frame += 1
+
+        cap.release()
+        out.release()
+
+        if frames_written == 0:
+            st.error(f"No frames extracted. Start: {start_time}s, End: {end_time}s")
+            return False
+
+        # Verify file was created and has size > 0
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            st.error(f"Clip file not created or empty: {output_path}")
+            return False
+
+        return True
+    except Exception as e:
+        st.error(f"Error extracting clip: {e}")
+        import traceback
+        st.error(traceback.format_exc())
+        return False
+
+def process_video(video_path, model, processor, embedding_model, video_name, output_dir, batch_size=4, max_workers=2, save_interval=8):
     """Process video and extract frame descriptions with parallel processing and incremental saving"""
 
     # Step 1: Extract all frames first
@@ -181,7 +305,7 @@ def process_video(video_path, model, processor, video_name, output_dir, batch_si
     # Step 3: Process batches sequentially
     for batch_idx, batch in enumerate(batches):
         try:
-            batch_results = process_frame_batch(batch, model, processor)
+            batch_results = process_frame_batch(batch, model, processor, embedding_model)
             all_results.extend(batch_results)
             processed_count += len(batch_results)
 
@@ -208,9 +332,9 @@ def process_video(video_path, model, processor, video_name, output_dir, batch_si
     return all_results, json_filename
 
 def main():
-    st.set_page_config(page_title="Video Frame Analyzer", page_icon="🎬", layout="wide")
+    st.set_page_config(page_title="Semantic Video Search", page_icon="🎬", layout="wide")
 
-    st.title("🎬 Video Frame Analyzer")
+    st.title("🎬 Semantic Video Search")
     st.markdown("Upload a video to generate keywords for each frame")
 
     # File uploader
@@ -219,6 +343,150 @@ def main():
     if uploaded_file is not None:
         # Display video
         st.video(uploaded_file)
+
+        # Check if JSON already exists
+        output_dir = "video_frames_analysis"
+        os.makedirs(output_dir, exist_ok=True)
+
+        base_name = Path(uploaded_file.name).stem
+        json_filename = os.path.join(output_dir, f"{base_name}.json")
+        json_exists = os.path.exists(json_filename)
+
+        if json_exists:
+            # Load existing analysis
+            with open(json_filename, 'r', encoding='utf-8') as f:
+                existing_data = json.load(f)
+
+            st.success(f"✓ Found existing analysis: {base_name}.json ({existing_data['total_frames']} frames)")
+
+            # Show existing results
+            with st.expander("📊 View All Frames", expanded=False):
+                for frame in existing_data['frames']:
+                    col1, col2 = st.columns([1, 4])
+                    with col1:
+                        st.markdown(f"**Frame {frame['frame_number']}**")
+                    with col2:
+                        st.markdown(frame['text'])
+
+            # SEARCH INTERFACE
+            st.markdown("---")
+            st.header("🔍 Search Video")
+
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                query = st.text_input(
+                    "Enter your search query",
+                    placeholder="e.g., layup, person jumping, basketball shot...",
+                    key="search_query"
+                )
+            with col2:
+                top_k = st.number_input("Top results", min_value=1, max_value=20, value=5)
+
+            # Clip settings
+            with st.expander("⚙️ Clip Settings"):
+                padding_seconds = st.slider(
+                    "Padding (seconds before/after match)",
+                    min_value=0.0,
+                    max_value=5.0,
+                    value=2.0,
+                    step=0.5,
+                    help="Seconds to include before and after the matched frame"
+                )
+
+            if query:
+                # Load embedding model for search
+                with st.spinner("Loading embedding model..."):
+                    embedding_model = load_embedding_model()
+
+                # Perform search
+                try:
+                    results = search_frames(query, json_filename, embedding_model, top_k)
+
+                    st.markdown(f"### 📊 Top {len(results)} Results for: '{query}'")
+
+                    # Save video temporarily for clip extraction
+                    clips_dir = "extracted_clips"
+                    os.makedirs(clips_dir, exist_ok=True)
+
+                    video_path = os.path.join(clips_dir, f"temp_{uploaded_file.name}")
+                    if not os.path.exists(video_path):
+                        uploaded_file.seek(0)
+                        with open(video_path, 'wb') as f:
+                            f.write(uploaded_file.read())
+
+                    # Get video FPS
+                    cap = cv2.VideoCapture(video_path)
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    cap.release()
+
+                    # Display results
+                    for i, result in enumerate(results, 1):
+                        with st.container():
+                            st.markdown(f"#### Result {i}: Frame {result['frame_number']}")
+
+                            col1, col2 = st.columns([2, 3])
+
+                            with col1:
+                                st.metric("Similarity Score", f"{result['similarity']:.4f}")
+                                st.markdown(f"**Description:** {result['text']}")
+
+                            with col2:
+                                # Calculate timestamp
+                                frame_timestamp = get_frame_timestamp(
+                                    result['frame_number'],
+                                    frame_interval=30,
+                                    fps=fps
+                                )
+
+                                # Calculate clip times
+                                start_time = max(0, frame_timestamp - padding_seconds)
+                                end_time = frame_timestamp + padding_seconds
+
+                                st.markdown(f"**Timestamp:** {frame_timestamp:.2f}s (±{padding_seconds}s)")
+
+                                # Extract clip
+                                clip_filename = f"clip_{i}_frame{result['frame_number']}_{query.replace(' ', '_')[:20]}.mp4"
+                                clip_path = os.path.join(clips_dir, clip_filename)
+
+                                # Show extraction info
+                                with st.spinner(f"Extracting clip {i}..."):
+                                    success = extract_clip(video_path, start_time, end_time, clip_path)
+
+                                if success:
+                                    # Verify clip exists
+                                    if os.path.exists(clip_path):
+                                        file_size = os.path.getsize(clip_path)
+                                        st.success(f"✓ Clip created: {file_size / 1024:.1f} KB")
+
+                                        # Display video
+                                        st.video(clip_path)
+
+                                        # Download button
+                                        with open(clip_path, 'rb') as clip_file:
+                                            st.download_button(
+                                                label=f"📥 Download Clip {i}",
+                                                data=clip_file,
+                                                file_name=clip_filename,
+                                                mime="video/mp4",
+                                                key=f"download_{i}"
+                                            )
+                                    else:
+                                        st.error(f"Clip file not found: {clip_path}")
+                                else:
+                                    st.error("Failed to extract clip (see errors above)")
+
+                            st.markdown("---")
+
+                except Exception as e:
+                    st.error(f"Error during search: {e}")
+
+            # Ask if user wants to re-process
+            st.markdown("---")
+            st.warning("⚠️ Want to re-analyze this video?")
+            reprocess = st.checkbox("Yes, re-process this video")
+
+            if not reprocess:
+                st.stop()
 
         # Performance settings
         with st.expander("⚙️ Performance Settings"):
@@ -250,16 +518,21 @@ def main():
             output_dir = "video_frames_analysis"
             os.makedirs(output_dir, exist_ok=True)
 
-            # Load model
-            with st.spinner("Loading model..."):
+            # Load models
+            with st.spinner("Loading vision-language model..."):
                 model, processor = load_model()
-            st.success("✓ Model loaded!")
+            st.success("✓ VLM loaded!")
+
+            with st.spinner("Loading embedding model..."):
+                embedding_model = load_embedding_model()
+            st.success("✓ Embedding model loaded!")
 
             # Process video with performance settings and incremental saving
             result = process_video(
                 video_path,
                 model,
                 processor,
+                embedding_model,
                 video_name=uploaded_file.name,
                 output_dir=output_dir,
                 batch_size=batch_size,
@@ -301,8 +574,6 @@ def main():
                 # Clean up temp file
                 os.unlink(video_path)
     
-    else:
-        st.info("👆 Upload a video file to get started")
 
 if __name__ == "__main__":
     main()

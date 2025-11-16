@@ -1,1 +1,8 @@
 streamlit>=1.28.0
+transformers
+torch
+opencv-python
+pillow
+accelerate
+numpy
+sentence-transformers
