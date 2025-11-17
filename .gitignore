@@ -22,6 +22,8 @@ lib64/
 parts/
 sdist/
 var/
+extracted_clips/*
+.claude/settings.local.json
 wheels/
 *.egg-info/
 .installed.cfg
