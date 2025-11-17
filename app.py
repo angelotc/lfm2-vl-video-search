@@ -11,10 +11,22 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from pathlib import Path
 import re
-
+from streamlit_lottie import st_lottie
+import json
+import base64
+import cv2
+from PIL import Image
+import io
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="not-needed")
 # ============================================================================
 # MODEL LOADING FUNCTIONS
 # ============================================================================
+
+# Load Lottie animation
+def load_lottiefile(filepath: str):
+    with open(filepath, "r") as f:
+        return json.load(f)
 
 @st.cache_resource
 def load_vision_model(model_id="LiquidAI/LFM2-VL-450M"):
@@ -92,298 +104,441 @@ def download_youtube_video(url, output_path=None):
 # VIDEO PROCESSING FUNCTION (WITH TEMPORAL CONTEXT + EMBEDDINGS)
 # ============================================================================
 
-def process_video(video_path, model, processor, embedding_model, smart_filtering=True):
+
+
+def pil_to_base64(pil_img):
+    buffer = io.BytesIO()
+    pil_img.save(buffer, format="JPEG")
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+def ask_vlm(frames, question):
     """
-    Process video frames with temporal context AND generate embeddings.
-    This enables both VLM descriptions and semantic search.
-    
-    Args:
-        video_path: Path to video file
-        model: Vision-language model
-        processor: Model processor
-        embedding_model: Sentence transformer for embeddings
-        smart_filtering: Whether to skip similar frames
-    
-    Returns:
-        list: Frame data with descriptions and embeddings
+    frames: list of 3 PIL images (before, current, after)
+    question: text string to append
     """
+    contents = []
+    tags = ["BEFORE", "CURRENT", "AFTER"]
+
+    for tag, img in zip(tags, frames):
+        img_b64 = pil_to_base64(img)
+        contents.append({"type": "text", "text": f"{tag}:"})
+        contents.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}})
+
+    contents.append({"type": "text", "text": question})
+
+    resp = client.chat.completions.create(
+        model="lfm2-vl",
+        messages=[{"role":"user","content":contents}],
+        max_tokens=120,
+        temperature=0.2
+    )
+    return resp.choices[0].message.content.strip()
+
+# def process_video(video_path, model, processor, embedding_model, smart_filtering=True):
+#     """
+#     Process video frames with temporal context AND generate embeddings.
+#     This enables both VLM descriptions and semantic search.
+    
+#     Args:
+#         video_path: Path to video file
+#         model: Vision-language model
+#         processor: Model processor
+#         embedding_model: Sentence transformer for embeddings
+#         smart_filtering: Whether to skip similar frames
+    
+#     Returns:
+#         list: Frame data with descriptions and embeddings
+#     """
+#     all_frames = []
+#     skipped_count = 0
+    
+#     # Open the video
+#     cap = cv2.VideoCapture(video_path)
+    
+#     if not cap.isOpened():
+#         st.error("Error: Could not open video file")
+#         return None
+    
+#     fps = cap.get(cv2.CAP_PROP_FPS)
+#     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+#     frame_interval = int(fps)  # Extract one frame per second
+    
+#     st.info(f"📹 FPS: {fps:.2f}, extracting 1 frame per second with temporal context")
+#     if smart_filtering:
+#         st.info(f"🧠 Smart filtering enabled - VLM checks for changes")
+    
+#     # Progress indicators
+#     progress_bar = st.progress(0)
+#     status_text = st.empty()
+    
+#     # -------------------------------------------------------------------------
+#     # STEP 1: Load all video frames into memory buffer
+#     # -------------------------------------------------------------------------
+#     status_text.text("📹 Loading video frames into memory...")
+#     all_video_frames = []
+#     frame_count = 0
+    
+#     while cap.isOpened():
+#         ret, frame = cap.read()
+#         if not ret:
+#             break
+#         all_video_frames.append(frame)
+#         frame_count += 1
+    
+#     cap.release()
+#     st.success(f"✓ Loaded {len(all_video_frames)} frames into memory")
+    
+#     # -------------------------------------------------------------------------
+#     # STEP 2: Process frames with temporal context
+#     # -------------------------------------------------------------------------
+#     second_count = 0
+    
+#     for i in range(0, len(all_video_frames), frame_interval):
+#         second_count += 1
+#         timestamp = i / fps
+        
+#         # Update progress
+#         progress = i / len(all_video_frames)
+#         progress_bar.progress(progress)
+#         status_text.text(f"Processing frame {second_count} at {timestamp:.2f}s...")
+        
+#         # Get temporal context frames (before, current, after)
+#         temporal_frames = []
+        
+#         before_idx = max(0, i - 15)
+#         frame_rgb = cv2.cvtColor(all_video_frames[before_idx], cv2.COLOR_BGR2RGB)
+#         temporal_frames.append(Image.fromarray(frame_rgb))
+        
+#         frame_rgb = cv2.cvtColor(all_video_frames[i], cv2.COLOR_BGR2RGB)
+#         temporal_frames.append(Image.fromarray(frame_rgb))
+        
+#         after_idx = min(len(all_video_frames) - 1, i + 15)
+#         frame_rgb = cv2.cvtColor(all_video_frames[after_idx], cv2.COLOR_BGR2RGB)
+#         temporal_frames.append(Image.fromarray(frame_rgb))
+        
+#         # =====================================================================
+#         # ALWAYS ADD FIRST 5 FRAMES
+#         # =====================================================================
+#         if len(all_frames) < 5:
+#             conversation = [
+#                 {
+#                     "role": "user",
+#                     "content": [
+#                         {"type": "text", "text": "Frame BEFORE:"},
+#                         {"type": "image", "image": temporal_frames[0]},
+#                         {"type": "text", "text": "Frame CURRENT (describe this one):"},
+#                         {"type": "image", "image": temporal_frames[1]},
+#                         {"type": "text", "text": "Frame AFTER:"},
+#                         {"type": "image", "image": temporal_frames[2]},
+#                         {"type": "text", "text": "In MAXIMUM 40 words, describe CURRENT frame. Focus on: actions, text/numbers visible, main subjects. Be concise."},
+#                     ],
+#                 },
+#             ]
+            
+#             inputs = processor.apply_chat_template(
+#                 conversation,
+#                 add_generation_prompt=True,
+#                 return_tensors="pt",
+#                 return_dict=True,
+#                 tokenize=True,
+#             ).to(model.device)
+            
+#             input_length = inputs['input_ids'].shape[1]
+            
+#             outputs = model.generate(
+#                 **inputs, 
+#                 max_new_tokens=80,
+#                 do_sample=True,
+#                 temperature=0.2
+#             )
+            
+#             new_tokens = outputs[0][input_length:]
+#             description = processor.decode(new_tokens, skip_special_tokens=True).strip()
+            
+#             # Generate embedding for this description
+#             embedding = embedding_model.encode(description, convert_to_numpy=True)
+            
+#             # Save frame data WITH embedding
+#             all_frames.append({
+#                 "frame_number": second_count,
+#                 "timestamp_seconds": round(timestamp, 2),
+#                 "timestamp_formatted": f"{int(timestamp // 60):02d}:{int(timestamp % 60):02d}",
+#                 "description": description,
+#                 "embedding": embedding.tolist()  # Convert numpy to list for JSON
+#             })
+            
+#             status_text.text(f"✓ Frame {second_count} added (building baseline)")
+            
+#         # =====================================================================
+#         # FROM FRAME 6 ONWARDS: Smart filtering
+#         # =====================================================================
+#         else:
+#             if smart_filtering:
+#                 previous_context = ""
+#                 for prev_frame in all_frames[-5:]:
+#                     previous_context += f"F{prev_frame['frame_number']}: {prev_frame['description'][:60]}...\n"
+                
+#                 conversation = [
+#                     {
+#                         "role": "user",
+#                         "content": [
+#                             {"type": "text", "text": f"Previous 5 frames:\n{previous_context}\n\nNow look at these 3 frames:"},
+#                             {"type": "text", "text": "BEFORE:"},
+#                             {"type": "image", "image": temporal_frames[0]},
+#                             {"type": "text", "text": "CURRENT:"},
+#                             {"type": "image", "image": temporal_frames[1]},
+#                             {"type": "text", "text": "AFTER:"},
+#                             {"type": "image", "image": temporal_frames[2]},
+#                             {"type": "text", "text": "Is CURRENT frame DIFFERENT from previous? Answer ONLY 'YES' or 'NO'."},
+#                         ],
+#                     },
+#                 ]
+                
+#                 inputs = processor.apply_chat_template(
+#                     conversation,
+#                     add_generation_prompt=True,
+#                     return_tensors="pt",
+#                     return_dict=True,
+#                     tokenize=True,
+#                 ).to(model.device)
+                
+#                 input_length = inputs['input_ids'].shape[1]
+                
+#                 outputs = model.generate(
+#                     **inputs, 
+#                     max_new_tokens=20,
+#                     do_sample=True,
+#                     temperature=0.2
+#                 )
+                
+#                 new_tokens = outputs[0][input_length:]
+#                 response = processor.decode(new_tokens, skip_special_tokens=True).strip()
+                
+#                 response_upper = response.upper()
+#                 is_different = "YES" in response_upper[:100] or "NEW" in response_upper[:100] or "DIFFERENT" in response_upper[:100]
+                
+#                 if is_different:
+#                     conversation = [
+#                         {
+#                             "role": "user",
+#                             "content": [
+#                                 {"type": "text", "text": "Frame BEFORE:"},
+#                                 {"type": "image", "image": temporal_frames[0]},
+#                                 {"type": "text", "text": "Frame CURRENT (describe this one):"},
+#                                 {"type": "image", "image": temporal_frames[1]},
+#                                 {"type": "text", "text": "Frame AFTER:"},
+#                                 {"type": "image", "image": temporal_frames[2]},
+#                                 {"type": "text", "text": "In MAXIMUM 40 words, describe CURRENT frame. Focus on: actions, text/numbers visible, main subjects. Be concise."},
+#                             ],
+#                         },
+#                     ]
+                    
+#                     inputs = processor.apply_chat_template(
+#                         conversation,
+#                         add_generation_prompt=True,
+#                         return_tensors="pt",
+#                         return_dict=True,
+#                         tokenize=True,
+#                     ).to(model.device)
+                    
+#                     input_length = inputs['input_ids'].shape[1]
+                    
+#                     outputs = model.generate(
+#                         **inputs, 
+#                         max_new_tokens=80,
+#                         do_sample=True,
+#                         temperature=0.2
+#                     )
+                    
+#                     new_tokens = outputs[0][input_length:]
+#                     description = processor.decode(new_tokens, skip_special_tokens=True).strip()
+                    
+#                     # Generate embedding
+#                     embedding = embedding_model.encode(description, convert_to_numpy=True)
+                    
+#                     all_frames.append({
+#                         "frame_number": second_count,
+#                         "timestamp_seconds": round(timestamp, 2),
+#                         "timestamp_formatted": f"{int(timestamp // 60):02d}:{int(timestamp % 60):02d}",
+#                         "description": description,
+#                         "embedding": embedding.tolist()
+#                     })
+                    
+#                     status_text.text(f"✓ Frame {second_count} added (NEW content detected)")
+#                 else:
+#                     skipped_count += 1
+#                     status_text.text(f"⏭️ Frame {second_count} skipped (similar to previous) - {skipped_count} skipped")
+            
+#             else:
+#                 # Smart filtering disabled - add all frames
+#                 conversation = [
+#                     {
+#                         "role": "user",
+#                         "content": [
+#                             {"type": "text", "text": "Frame BEFORE:"},
+#                             {"type": "image", "image": temporal_frames[0]},
+#                             {"type": "text", "text": "Frame CURRENT (describe this one):"},
+#                             {"type": "image", "image": temporal_frames[1]},
+#                             {"type": "text", "text": "Frame AFTER:"},
+#                             {"type": "image", "image": temporal_frames[2]},
+#                             {"type": "text", "text": "In MAXIMUM 40 words, describe CURRENT frame. Focus on: actions, text/numbers, main subjects. Be concise."},
+#                         ],
+#                     },
+#                 ]
+                
+#                 inputs = processor.apply_chat_template(
+#                     conversation,
+#                     add_generation_prompt=True,
+#                     return_tensors="pt",
+#                     return_dict=True,
+#                     tokenize=True,
+#                 ).to(model.device)
+                
+#                 input_length = inputs['input_ids'].shape[1]
+                
+#                 outputs = model.generate(
+#                     **inputs,
+#                     max_new_tokens=80,
+#                     do_sample=True,
+#                     temperature=0.2
+#                 )
+                
+#                 new_tokens = outputs[0][input_length:]
+#                 description = processor.decode(new_tokens, skip_special_tokens=True).strip()
+                
+#                 # Generate embedding
+#                 embedding = embedding_model.encode(description, convert_to_numpy=True)
+                
+#                 all_frames.append({
+#                     "frame_number": second_count,
+#                     "timestamp_seconds": round(timestamp, 2),
+#                     "timestamp_formatted": f"{int(timestamp // 60):02d}:{int(timestamp % 60):02d}",
+#                     "description": description,
+#                     "embedding": embedding.tolist()
+#                 })
+    
+#     progress_bar.progress(1.0)
+#     status_text.text(f"✓ Complete! Saved {len(all_frames)} frames, skipped {skipped_count} similar frames")
+    
+#     return all_frames
+
+# # ============================================================================
+# # VIDEO CLIP EXTRACTION FUNCTION
+# # ============================================================================
+def process_video(video_path, embedding_model, smart_filtering=True):
+    """
+    Migrated version for llama.cpp LFM2-VL server.
+    """
+
     all_frames = []
     skipped_count = 0
-    
-    # Open the video
+
     cap = cv2.VideoCapture(video_path)
-    
     if not cap.isOpened():
         st.error("Error: Could not open video file")
         return None
-    
+
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    frame_interval = int(fps)  # Extract one frame per second
-    
-    st.info(f"📹 FPS: {fps:.2f}, extracting 1 frame per second with temporal context")
+    frame_interval = int(fps)
+
+    st.info(f"📹 FPS: {fps:.2f}, extracting 1 frame per second")
     if smart_filtering:
-        st.info(f"🧠 Smart filtering enabled - VLM checks for changes")
-    
-    # Progress indicators
+        st.info("🧠 Smart filtering enabled")
+
     progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    # -------------------------------------------------------------------------
-    # STEP 1: Load all video frames into memory buffer
-    # -------------------------------------------------------------------------
-    status_text.text("📹 Loading video frames into memory...")
+    status = st.empty()
+
+    # --------------------------
+    # LOAD FRAMES INTO MEMORY
+    # --------------------------
+    status.text("📹 Loading video frames...")
     all_video_frames = []
-    frame_count = 0
-    
-    while cap.isOpened():
+    while True:
         ret, frame = cap.read()
         if not ret:
             break
         all_video_frames.append(frame)
-        frame_count += 1
-    
     cap.release()
-    st.success(f"✓ Loaded {len(all_video_frames)} frames into memory")
-    
-    # -------------------------------------------------------------------------
-    # STEP 2: Process frames with temporal context
-    # -------------------------------------------------------------------------
+
+    st.success(f"✓ Loaded {len(all_video_frames)} frames")
+
     second_count = 0
-    
+
+    # --------------------------
+    # PROCESS SECONDS
+    # --------------------------
     for i in range(0, len(all_video_frames), frame_interval):
         second_count += 1
         timestamp = i / fps
-        
-        # Update progress
-        progress = i / len(all_video_frames)
-        progress_bar.progress(progress)
-        status_text.text(f"Processing frame {second_count} at {timestamp:.2f}s...")
-        
-        # Get temporal context frames (before, current, after)
-        temporal_frames = []
-        
-        before_idx = max(0, i - 15)
-        frame_rgb = cv2.cvtColor(all_video_frames[before_idx], cv2.COLOR_BGR2RGB)
-        temporal_frames.append(Image.fromarray(frame_rgb))
-        
-        frame_rgb = cv2.cvtColor(all_video_frames[i], cv2.COLOR_BGR2RGB)
-        temporal_frames.append(Image.fromarray(frame_rgb))
-        
-        after_idx = min(len(all_video_frames) - 1, i + 15)
-        frame_rgb = cv2.cvtColor(all_video_frames[after_idx], cv2.COLOR_BGR2RGB)
-        temporal_frames.append(Image.fromarray(frame_rgb))
-        
-        # =====================================================================
-        # ALWAYS ADD FIRST 5 FRAMES
-        # =====================================================================
+
+        progress_bar.progress(i / len(all_video_frames))
+        status.text(f"Processing frame {second_count} at {timestamp:.2f}s")
+
+        # Build temporal window (before/current/after)
+        idx_before = max(0, i - 15)
+        idx_after  = min(len(all_video_frames)-1, i + 15)
+
+        pil_before  = Image.fromarray(cv2.cvtColor(all_video_frames[idx_before], cv2.COLOR_BGR2RGB))
+        pil_current = Image.fromarray(cv2.cvtColor(all_video_frames[i], cv2.COLOR_BGR2RGB))
+        pil_after   = Image.fromarray(cv2.cvtColor(all_video_frames[idx_after], cv2.COLOR_BGR2RGB))
+
+        frames = [pil_before, pil_current, pil_after]
+
+        # Always describe first 5 frames
         if len(all_frames) < 5:
-            conversation = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Frame BEFORE:"},
-                        {"type": "image", "image": temporal_frames[0]},
-                        {"type": "text", "text": "Frame CURRENT (describe this one):"},
-                        {"type": "image", "image": temporal_frames[1]},
-                        {"type": "text", "text": "Frame AFTER:"},
-                        {"type": "image", "image": temporal_frames[2]},
-                        {"type": "text", "text": "In MAXIMUM 40 words, describe CURRENT frame. Focus on: actions, text/numbers visible, main subjects. Be concise."},
-                    ],
-                },
-            ]
-            
-            inputs = processor.apply_chat_template(
-                conversation,
-                add_generation_prompt=True,
-                return_tensors="pt",
-                return_dict=True,
-                tokenize=True,
-            ).to(model.device)
-            
-            input_length = inputs['input_ids'].shape[1]
-            
-            outputs = model.generate(
-                **inputs, 
-                max_new_tokens=80,
-                do_sample=True,
-                temperature=0.2
+            description = ask_vlm(
+                frames,
+                "In MAXIMUM 40 words, describe CURRENT frame concisely."
             )
-            
-            new_tokens = outputs[0][input_length:]
-            description = processor.decode(new_tokens, skip_special_tokens=True).strip()
-            
-            # Generate embedding for this description
+
             embedding = embedding_model.encode(description, convert_to_numpy=True)
-            
-            # Save frame data WITH embedding
+
             all_frames.append({
                 "frame_number": second_count,
                 "timestamp_seconds": round(timestamp, 2),
-                "timestamp_formatted": f"{int(timestamp // 60):02d}:{int(timestamp % 60):02d}",
+                "timestamp_formatted": f"{int(timestamp//60):02d}:{int(timestamp%60):02d}",
                 "description": description,
-                "embedding": embedding.tolist()  # Convert numpy to list for JSON
+                "embedding": embedding.tolist()
             })
-            
-            status_text.text(f"✓ Frame {second_count} added (building baseline)")
-            
-        # =====================================================================
-        # FROM FRAME 6 ONWARDS: Smart filtering
-        # =====================================================================
-        else:
-            if smart_filtering:
-                previous_context = ""
-                for prev_frame in all_frames[-5:]:
-                    previous_context += f"F{prev_frame['frame_number']}: {prev_frame['description'][:60]}...\n"
-                
-                conversation = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": f"Previous 5 frames:\n{previous_context}\n\nNow look at these 3 frames:"},
-                            {"type": "text", "text": "BEFORE:"},
-                            {"type": "image", "image": temporal_frames[0]},
-                            {"type": "text", "text": "CURRENT:"},
-                            {"type": "image", "image": temporal_frames[1]},
-                            {"type": "text", "text": "AFTER:"},
-                            {"type": "image", "image": temporal_frames[2]},
-                            {"type": "text", "text": "Is CURRENT frame DIFFERENT from previous? Answer ONLY 'YES' or 'NO'."},
-                        ],
-                    },
-                ]
-                
-                inputs = processor.apply_chat_template(
-                    conversation,
-                    add_generation_prompt=True,
-                    return_tensors="pt",
-                    return_dict=True,
-                    tokenize=True,
-                ).to(model.device)
-                
-                input_length = inputs['input_ids'].shape[1]
-                
-                outputs = model.generate(
-                    **inputs, 
-                    max_new_tokens=20,
-                    do_sample=True,
-                    temperature=0.2
-                )
-                
-                new_tokens = outputs[0][input_length:]
-                response = processor.decode(new_tokens, skip_special_tokens=True).strip()
-                
-                response_upper = response.upper()
-                is_different = "YES" in response_upper[:100] or "NEW" in response_upper[:100] or "DIFFERENT" in response_upper[:100]
-                
-                if is_different:
-                    conversation = [
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": "Frame BEFORE:"},
-                                {"type": "image", "image": temporal_frames[0]},
-                                {"type": "text", "text": "Frame CURRENT (describe this one):"},
-                                {"type": "image", "image": temporal_frames[1]},
-                                {"type": "text", "text": "Frame AFTER:"},
-                                {"type": "image", "image": temporal_frames[2]},
-                                {"type": "text", "text": "In MAXIMUM 40 words, describe CURRENT frame. Focus on: actions, text/numbers visible, main subjects. Be concise."},
-                            ],
-                        },
-                    ]
-                    
-                    inputs = processor.apply_chat_template(
-                        conversation,
-                        add_generation_prompt=True,
-                        return_tensors="pt",
-                        return_dict=True,
-                        tokenize=True,
-                    ).to(model.device)
-                    
-                    input_length = inputs['input_ids'].shape[1]
-                    
-                    outputs = model.generate(
-                        **inputs, 
-                        max_new_tokens=80,
-                        do_sample=True,
-                        temperature=0.2
-                    )
-                    
-                    new_tokens = outputs[0][input_length:]
-                    description = processor.decode(new_tokens, skip_special_tokens=True).strip()
-                    
-                    # Generate embedding
-                    embedding = embedding_model.encode(description, convert_to_numpy=True)
-                    
-                    all_frames.append({
-                        "frame_number": second_count,
-                        "timestamp_seconds": round(timestamp, 2),
-                        "timestamp_formatted": f"{int(timestamp // 60):02d}:{int(timestamp % 60):02d}",
-                        "description": description,
-                        "embedding": embedding.tolist()
-                    })
-                    
-                    status_text.text(f"✓ Frame {second_count} added (NEW content detected)")
-                else:
-                    skipped_count += 1
-                    status_text.text(f"⏭️ Frame {second_count} skipped (similar to previous) - {skipped_count} skipped")
-            
-            else:
-                # Smart filtering disabled - add all frames
-                conversation = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Frame BEFORE:"},
-                            {"type": "image", "image": temporal_frames[0]},
-                            {"type": "text", "text": "Frame CURRENT (describe this one):"},
-                            {"type": "image", "image": temporal_frames[1]},
-                            {"type": "text", "text": "Frame AFTER:"},
-                            {"type": "image", "image": temporal_frames[2]},
-                            {"type": "text", "text": "In MAXIMUM 40 words, describe CURRENT frame. Focus on: actions, text/numbers, main subjects. Be concise."},
-                        ],
-                    },
-                ]
-                
-                inputs = processor.apply_chat_template(
-                    conversation,
-                    add_generation_prompt=True,
-                    return_tensors="pt",
-                    return_dict=True,
-                    tokenize=True,
-                ).to(model.device)
-                
-                input_length = inputs['input_ids'].shape[1]
-                
-                outputs = model.generate(
-                    **inputs,
-                    max_new_tokens=80,
-                    do_sample=True,
-                    temperature=0.2
-                )
-                
-                new_tokens = outputs[0][input_length:]
-                description = processor.decode(new_tokens, skip_special_tokens=True).strip()
-                
-                # Generate embedding
-                embedding = embedding_model.encode(description, convert_to_numpy=True)
-                
-                all_frames.append({
-                    "frame_number": second_count,
-                    "timestamp_seconds": round(timestamp, 2),
-                    "timestamp_formatted": f"{int(timestamp // 60):02d}:{int(timestamp % 60):02d}",
-                    "description": description,
-                    "embedding": embedding.tolist()
-                })
-    
+            continue
+
+        # Smart filtering
+        if smart_filtering:
+            # summarize last 5 descriptions
+            prev = "\n".join([f"F{f['frame_number']}: {f['description'][:60]}..." for f in all_frames[-5:]])
+
+            decision = ask_vlm(
+                frames,
+                f"Previous 5 frames:\n{prev}\n\nIs CURRENT frame different? Answer ONLY YES or NO."
+            ).upper()
+
+            is_new = "YES" in decision or "DIFFERENT" in decision or "NEW" in decision
+
+            if not is_new:
+                skipped_count += 1
+                status.text(f"⏭️ Frame {second_count} skipped ({skipped_count} skipped)")
+                continue
+
+        # If new OR smart filtering off:
+        description = ask_vlm(
+            frames,
+            "In MAXIMUM 40 words, describe CURRENT frame concisely."
+        )
+
+        embedding = embedding_model.encode(description, convert_to_numpy=True)
+
+        all_frames.append({
+            "frame_number": second_count,
+            "timestamp_seconds": round(timestamp, 2),
+            "timestamp_formatted": f"{int(timestamp//60):02d}:{int(timestamp%60):02d}",
+            "description": description,
+            "embedding": embedding.tolist()
+        })
+
     progress_bar.progress(1.0)
-    status_text.text(f"✓ Complete! Saved {len(all_frames)} frames, skipped {skipped_count} similar frames")
-    
+    status.text(f"✓ Complete! Saved {len(all_frames)} frames, skipped {skipped_count}")
+
     return all_frames
-
-# ============================================================================
-# VIDEO CLIP EXTRACTION FUNCTION
-# ============================================================================
-
 def extract_video_clip(video_path, start_time, end_time, output_path):
     """
     Extract a video clip from start_time to end_time.
@@ -691,15 +846,340 @@ Answer:"""
     
     return response.strip()
 
+
+
 # ============================================================================
-# COMPLETE MAIN FUNCTION
+# COMPLETE MAIN FUNCTION - CLEAN & MINIMAL UI
+# ============================================================================
+# ============================================================================
+# LOTTIE ANIMATION LOADER
+# ============================================================================
+
+def load_lottiefile(filepath: str):
+    """Load Lottie animation from JSON file"""
+    try:
+        with open(filepath, "r") as f:
+            return json.load(f)
+    except:
+        return None
+
+# ============================================================================
+# COMPLETE MAIN FUNCTION - MINIMAL B&W DESIGN
 # ============================================================================
 
 def main():
-    st.set_page_config(page_title="Video Frame Analyzer & Chat", page_icon="🎬", layout="wide")
+    # Page config
+    st.set_page_config(
+        page_title="Video Frame Analyzer",
+        page_icon="🎬",
+        layout="wide",
+        initial_sidebar_state="collapsed"
+    )
     
-    st.title("🎬 Video Frame Analyzer & Chat")
-    st.markdown("Upload a video or provide a YouTube URL to analyze frames and chat about the content")
+    # Custom CSS for minimal B&W design
+    st.markdown("""
+<style>
+/* Main background */
+.stApp {
+    background-color: #f5f5f5;
+}
+
+/* REMOVE BLACK BAR - Hide header completely */
+header {
+    visibility: hidden;
+    height: 0;
+    padding: 0;
+    margin: 0;
+}
+
+.main > div {
+    padding-top: 1rem;
+}
+
+/* Remove extra padding */
+.block-container {
+    padding-top: 1rem;
+    padding-bottom: 2rem;
+    max-width: 1200px;
+}
+
+/* PROGRESS BAR - Dark text on light background */
+.stProgress > div > div > div > div {
+    background-color: #4A90E2;
+}
+
+/* Progress text - make it visible */
+.stProgress {
+    background-color: #e0e0e0;
+}
+
+/* Status text during processing */
+.element-container div[data-testid="stMarkdownContainer"] p {
+    color: #333;
+}
+
+/* Spinner text */
+.stSpinner > div {
+    border-top-color: #4A90E2 !important;
+}
+
+.stSpinner > div > div {
+    color: #333 !important;
+}
+
+/* Clean tabs - EQUALLY SPACED */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 12px;
+    background-color: transparent;
+    padding: 0;
+    border-bottom: none;
+    justify-content: space-evenly;
+}
+
+.stTabs [data-baseweb="tab"] {
+    background-color: #ffffff;
+    border-radius: 8px;
+    padding: 12px 24px;
+    border: 1px solid #e0e0e0;
+    color: #333;
+    font-weight: 500;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+    min-width: 200px;
+}
+
+.stTabs [aria-selected="true"] {
+    background-color: #4A90E2;
+    color: white;
+    border: 1px solid #4A90E2;
+    box-shadow: 0 4px 8px rgba(74, 144, 226, 0.3);
+}
+
+/* File uploader styling */
+.stFileUploader {
+    background-color: #2d2d2d;
+    border-radius: 12px;
+    padding: 2rem;
+    border: 2px dashed #555;
+}
+
+.stFileUploader label {
+    color: #ffffff !important;
+}
+
+.stFileUploader [data-testid="stFileUploadDropzone"] {
+    background-color: #2d2d2d;
+}
+
+.stFileUploader [data-testid="stFileUploadDropzone"] section {
+    background-color: #2d2d2d;
+    border: none;
+}
+
+.stFileUploader small {
+    color: #999 !important;
+}
+
+/* Buttons */
+.stButton button {
+    border-radius: 8px;
+    border: 1px solid #e0e0e0;
+    font-weight: 500;
+    transition: all 0.3s ease;
+}
+
+.stButton button:hover {
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+    transform: translateY(-2px);
+}
+
+/* Primary button */
+.stButton button[kind="primary"] {
+    background-color: #4A90E2;
+    color: white;
+    border: none;
+}
+
+/* Radio buttons */
+.stRadio > label {
+    font-weight: 500;
+    color: #333;
+}
+
+.stRadio [role="radiogroup"] {
+    gap: 1rem;
+}
+
+/* Input fields - BLACK TEXT */
+.stTextInput input, .stNumberInput input {
+    border-radius: 8px;
+    border: 1px solid #e0e0e0;
+    background-color: #ffffff;
+    color: #000000 !important;
+    font-size: 1rem;
+}
+
+/* Placeholder text - gray */
+.stTextInput input::placeholder {
+    color: #999 !important;
+}
+
+/* Text area - BLACK TEXT */
+.stTextArea textarea {
+    color: #000000 !important;
+    background-color: #ffffff;
+    border-radius: 8px;
+    border: 1px solid #e0e0e0;
+}
+
+.stTextArea textarea::placeholder {
+    color: #999 !important;
+}
+
+/* Select box - BLACK TEXT */
+.stSelectbox div[data-baseweb="select"] > div {
+    color: #000000 !important;
+    background-color: #ffffff;
+    border-radius: 8px;
+    border: 1px solid #e0e0e0;
+}
+
+.stSelectbox [data-baseweb="select"] {
+    background-color: #ffffff;
+}
+
+.stSelectbox label {
+    color: #333;
+    font-weight: 500;
+}
+
+/* Dropdown menu items - BLACK TEXT */
+[role="listbox"] [role="option"] {
+    color: #000000 !important;
+}
+
+/* Metrics */
+[data-testid="stMetricValue"] {
+    font-size: 1.5rem;
+    color: #2c3e50;
+    font-weight: 600;
+}
+
+[data-testid="stMetricLabel"] {
+    color: #666;
+    font-size: 0.9rem;
+}
+
+/* Expanders */
+.streamlit-expanderHeader {
+    background-color: #ffffff;
+    border-radius: 8px;
+    border: 1px solid #e0e0e0;
+    font-weight: 500;
+    color: #333;
+}
+
+.streamlit-expanderContent {
+    background-color: #ffffff;
+    border: 1px solid #e0e0e0;
+    border-top: none;
+    border-radius: 0 0 8px 8px;
+}
+
+/* Frame display */
+.frame-item {
+    background-color: #ffffff;
+    padding: 12px 16px;
+    border-radius: 8px;
+    margin-bottom: 8px;
+    border-left: 3px solid #4A90E2;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+/* Chat messages */
+.stChatMessage {
+    background-color: #ffffff;
+    border-radius: 8px;
+    padding: 1rem;
+    margin: 0.5rem 0;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+/* Video container */
+.video-container {
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    margin: 1rem 0;
+}
+
+/* Info/Success/Warning boxes */
+.stAlert {
+    border-radius: 8px;
+    border-left: 4px solid #4A90E2;
+    background-color: #ffffff;
+}
+
+/* Success message */
+.element-container:has(.stSuccess) {
+    color: #2d862d;
+}
+
+/* Info message */
+.element-container:has(.stInfo) {
+    color: #333;
+}
+
+/* Download button */
+.stDownloadButton button {
+    background-color: #2d2d2d;
+    color: white;
+    border: none;
+    font-weight: 500;
+}
+
+.stDownloadButton button:hover {
+    background-color: #1a1a1a;
+}
+
+/* Checkbox */
+.stCheckbox {
+    color: #333;
+}
+
+.stCheckbox label {
+    color: #333 !important;
+}
+
+/* Slider */
+.stSlider {
+    color: #333;
+}
+
+[data-testid="stSlider"] label {
+    color: #333;
+}
+
+/* Caption text */
+.caption {
+    color: #666 !important;
+}
+</style>
+""", unsafe_allow_html=True)
+    # Header with title on black bar
+    st.markdown("""
+    <div style="background-color: #1a1a1a; padding: 1.5rem 2rem; border-radius: 12px; margin: 0 auto 1rem auto; max-width: 600px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+        <h1 style="text-align: center; color: #ffffff; margin: 0; font-size: 2rem; font-weight: 600; letter-spacing: 2px;">
+            VIDEO QA
+        </h1>
+    </div>
+""", unsafe_allow_html=True)
+    
+    # Lottie animation below
+    lottie_animation = load_lottiefile("animation.json")
+    if lottie_animation:
+        col1, col2, col3 = st.columns([1, 3, 1])
+        with col2:
+            st_lottie(lottie_animation, height=180, key="header_animation")
     
     # Initialize session state
     if 'video_data' not in st.session_state:
@@ -713,57 +1193,75 @@ def main():
     if 'video_file_path' not in st.session_state:
         st.session_state.video_file_path = None
     
-    # Create tabs
-    tab1, tab2, tab3 = st.tabs(["📹 Video Analysis", "🔍 Search & Clips", "💬 Chat with Video"])
+    # Create tabs - ONLY 2 TABS
+    tab1, tab2 = st.tabs(["📹 Analyze Video", "🔍 Search & Clips"])
     
     # =========================================================================
     # TAB 1: VIDEO ANALYSIS
     # =========================================================================
     with tab1:
-        input_method = st.radio("Choose input method:", ["Upload File", "YouTube URL"])
+        col1, col2 = st.columns([3, 1])
         
-        smart_filtering = st.checkbox("🧠 Enable Smart Filtering (VLM checks for frame changes)", value=True)
+        with col1:
+            input_method = st.radio(
+                "Choose input method:",
+                ["📁 Upload File", "🔗 YouTube URL"],
+                horizontal=True
+            )
+        
+        with col2:
+            smart_filtering = st.checkbox("🧠 Smart Filtering", value=True)
         
         video_path = None
         video_name = None
-        youtube_url = None
         
-        if input_method == "Upload File":
-            uploaded_file = st.file_uploader("Choose a video file", type=['mov', 'mp4', 'avi', 'mkv'])
+        if input_method == "📁 Upload File":
+            uploaded_file = st.file_uploader(
+                "Drag and drop file here",
+                type=['mov', 'mp4', 'avi', 'mkv', 'mpeg4'],
+                help="Limit 200MB per file • MOV, MP4, AVI, MKV, MPEG4"
+            )
             
             if uploaded_file is not None:
+                st.markdown('<div class="video-container">', unsafe_allow_html=True)
                 st.video(uploaded_file)
+                st.markdown('</div>', unsafe_allow_html=True)
                 video_name = uploaded_file.name
                 
-                if st.button("🚀 Start Analysis", type="primary", key="upload_analyze"):
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
-                        tmp_file.write(uploaded_file.read())
-                        video_path = tmp_file.name
-                        st.session_state.video_file_path = video_path
+                col1, col2, col3 = st.columns([1, 2, 1])
+                with col2:
+                    if st.button("🚀 Analyze Video", type="primary", use_container_width=True):
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
+                            tmp_file.write(uploaded_file.read())
+                            video_path = tmp_file.name
+                            st.session_state.video_file_path = video_path
         
-        else:
-            youtube_url = st.text_input("Enter YouTube URL:", placeholder="https://www.youtube.com/watch?v=...")
+        else:  # YouTube URL
+            youtube_url = st.text_input("", placeholder="https://www.youtube.com/watch?v=...", label_visibility="collapsed")
             
             if youtube_url:
-                if st.button("🚀 Download & Analyze", type="primary", key="youtube_analyze"):
-                    with st.spinner("Downloading video from YouTube..."):
-                        video_path, video_name = download_youtube_video(youtube_url)
-                    
-                    if video_path:
-                        st.success(f"✓ Downloaded: {video_name}")
-                        st.video(video_path)
-                        st.session_state.video_file_path = video_path
+                col1, col2, col3 = st.columns([1, 2, 1])
+                with col2:
+                    if st.button("🚀 Download & Analyze", type="primary", use_container_width=True):
+                        with st.spinner("⏳ Downloading from YouTube..."):
+                            video_path, video_name = download_youtube_video(youtube_url)
+                        
+                        if video_path:
+                            st.success(f"✓ {video_name}")
+                            st.markdown('<div class="video-container">', unsafe_allow_html=True)
+                            st.video(video_path)
+                            st.markdown('</div>', unsafe_allow_html=True)
+                            st.session_state.video_file_path = video_path
         
+        # Process video
         if video_path:
-            with st.spinner("Loading vision model..."):
+            st.markdown("---")
+            
+            with st.spinner("🔄 Loading AI models..."):
                 vision_model, processor = load_vision_model()
-            st.success("✓ Vision model loaded!")
-            
-            with st.spinner("Loading embedding model..."):
                 embedding_model = load_embedding_model()
-            st.success("✓ Embedding model loaded!")
             
-            results = process_video(video_path, vision_model, processor, embedding_model, smart_filtering)
+            results = process_video(video_path, embedding_model, smart_filtering=True)
             
             if results:
                 output_dir = "video_frames_analysis"
@@ -783,99 +1281,100 @@ def main():
                 with open(json_filename, 'w', encoding='utf-8') as f:
                     json.dump(output_data, f, indent=4)
                 
-                st.success(f"✓ Saved to: {json_filename}")
+                st.success("✅ Analysis Complete!")
                 
-                st.markdown("---")
-                st.header("📊 Results")
-                
-                col1, col2 = st.columns(2)
+                # Metrics
+                col1, col2, col3, col4 = st.columns(4)
                 with col1:
-                    st.metric("Frames Saved", len(results))
+                    st.metric("📊 Frames", len(results))
                 with col2:
-                    if smart_filtering:
-                        st.metric("Quality", "Filtered for changes")
+                    st.metric("⏱️ Duration", f"{results[-1]['timestamp_seconds']:.0f}s")
+                with col3:
+                    st.metric("🎯 Quality", "Filtered" if smart_filtering else "All")
+                with col4:
+                    st.metric("💾 Size", f"{len(results) * 0.5:.1f}KB")
                 
-                for frame in results:
-                    col1, col2, col3 = st.columns([1, 1, 5])
-                    with col1:
-                        st.markdown(f"**Frame {frame['frame_number']}**")
-                    with col2:
-                        st.markdown(f"`{frame['timestamp_formatted']}`")
-                    with col3:
-                        st.markdown(frame['description'])
+                # Frame preview
+                st.markdown("### 📊 Frame Analysis")
                 
+                with st.expander(f"View all {len(results)} frames", expanded=False):
+                    for frame in results:
+                        st.markdown(f"""
+                        <div class="frame-item">
+                            <b>Frame {frame['frame_number']}</b> 
+                            <span style="color: #888;">• {frame['timestamp_formatted']}</span>
+                            <br>
+                            <span style="font-size: 0.9rem; color: #555;">{frame['description']}</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+                
+                # Download button
                 json_str = json.dumps(output_data, indent=4)
-                st.download_button(
-                    label="📥 Download JSON",
-                    data=json_str,
-                    file_name="video_analysis.json",
-                    mime="application/json"
-                )
+                col1, col2, col3 = st.columns([1, 2, 1])
+                with col2:
+                    st.download_button(
+                        label="📥 Download Analysis (JSON)",
+                        data=json_str,
+                        file_name="video_analysis.json",
+                        mime="application/json",
+                        use_container_width=True
+                    )
                 
-                st.info("✨ Go to 'Search & Clips' or 'Chat' tabs to interact with the video!")
-        
-        if not video_path and input_method == "Upload File":
-            st.info("👆 Upload a video file to get started")
-        elif not youtube_url and input_method == "YouTube URL":
-            st.info("👆 Enter a YouTube URL to get started")
+                st.info("✨ Navigate to **Search & Clips** tab to search and extract video clips!")
     
     # =========================================================================
-    # TAB 2: SEARCH & VIDEO CLIPS (UNCHANGED - KEEP AS IS)
+    # TAB 2: SEARCH & CLIPS
     # =========================================================================
     with tab2:
-        st.markdown("### 📂 Load Video Analysis")
-        uploaded_json = st.file_uploader("Upload existing JSON analysis (optional)", type=['json'], key="json_uploader_search")
-        if uploaded_json:
-            loaded_data = json.load(uploaded_json)
-            st.session_state.video_data = loaded_data
-            st.success(f"✓ Loaded: {loaded_data['video_name']} ({loaded_data['total_frames']} frames)")
+        # Load existing analysis
+        with st.expander("📂 Load Previous Analysis"):
+            uploaded_json = st.file_uploader("Upload JSON", type=['json'], key="json_uploader_search", label_visibility="collapsed")
+            if uploaded_json:
+                loaded_data = json.load(uploaded_json)
+                st.session_state.video_data = loaded_data
+                st.success(f"✓ Loaded: {loaded_data['video_name']}")
         
         if st.session_state.video_data is None:
-            st.warning("⚠️ Please analyze a video first or upload a JSON file")
+            st.info("👆 Please analyze a video in the **Analyze Video** tab or load an existing JSON file above")
         else:
-            st.success(f"✓ Loaded: {st.session_state.video_data['video_name']}")
-            st.info(f"📊 {st.session_state.video_data['total_frames']} frames available")
+            st.markdown(f"**📹 {st.session_state.video_data['video_name']}** • {st.session_state.video_data['total_frames']} frames")
             
             # Load models
             if 'embedding_model' not in st.session_state:
-                with st.spinner("Loading embedding model..."):
+                with st.spinner("Loading search models..."):
                     st.session_state.embedding_model = load_embedding_model()
-                st.success("✓ Embedding model loaded!")
             
             if 'text_model' not in st.session_state:
-                with st.spinner("Loading text model..."):
+                with st.spinner("Loading text models..."):
                     text_model, text_tokenizer = load_text_model()
                     st.session_state.text_model = text_model
                     st.session_state.text_tokenizer = text_tokenizer
-                st.success("✓ Text model loaded!")
+            
+            st.markdown("---")
             
             # Search interface
-            st.markdown("---")
-            st.header("🔍 Search Video")
+            col1, col2, col3 = st.columns([4, 2, 1])
             
-            # Search method selector
-            search_method = st.radio(
-                "Search method:",
-                ["Embedding Search (Semantic)", "Text Search (Flexible Time Ranges)"],
-                help="Embedding: Fast, finds by meaning | Text: Gives time ranges, more flexible"
-            )
+            with col1:
+                query = st.text_input("", placeholder="🔍 Search your video...", label_visibility="collapsed")
             
-            query = st.text_input("Enter your search query:", placeholder="e.g., 'when did Wisconsin score first point?'")
+            with col2:
+                search_method = st.selectbox("", ["Semantic", "Time Range"], label_visibility="collapsed")
             
-            # Clip settings
-            with st.expander("⚙️ Video Clip Settings"):
-                padding_seconds = st.slider(
-                    "Padding (seconds before/after)",
-                    min_value=0.0,
-                    max_value=10.0,
-                    value=3.0,
-                    step=0.5
-                )
-                top_k = st.slider("Number of results to show", 1, 10, 3)
+            with col3:
+                search_button = st.button("Search", type="primary", use_container_width=True)
             
-            if query and st.button("🔍 Search", type="primary"):
-                # EMBEDDING SEARCH
-                if search_method == "Embedding Search (Semantic)":
+            # Settings
+            with st.expander("⚙️ Search Settings"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    padding_seconds = st.slider("Clip Padding (seconds)", 0.0, 10.0, 3.0, 0.5)
+                with col2:
+                    top_k = st.slider("Number of Results", 1, 10, 3)
+            
+            if query and search_button:
+                # SEMANTIC SEARCH
+                if search_method == "Semantic":
                     results = search_by_embedding(
                         query, 
                         st.session_state.video_data, 
@@ -883,22 +1382,22 @@ def main():
                         top_k=top_k
                     )
                     
-                    st.markdown(f"### 📊 Top {len(results)} Results (Semantic Search)")
+                    st.markdown(f"### 📊 Top {len(results)} Results")
                     
                     for i, result in enumerate(results, 1):
-                        st.markdown(f"#### Result {i}: Frame {result['frame_number']} - Similarity: {result['similarity']:.3f}")
-                        
-                        col1, col2 = st.columns([1, 2])
-                        
-                        with col1:
-                            st.markdown(f"**Time:** {result['timestamp_formatted']} ({result['timestamp_seconds']}s)")
-                            st.markdown(f"**Description:** {result['description']}")
-                        
-                        with col2:
+                        with st.container():
+                            col1, col2 = st.columns([3, 1])
+                            with col1:
+                                st.markdown(f"**Result {i}** • Frame {result['frame_number']} • {result['timestamp_formatted']}")
+                            with col2:
+                                st.markdown(f"**Similarity:** {result['similarity']:.2%}")
+                            
+                            with st.expander("📝 Description"):
+                                st.write(result['description'])
+                            
+                            # Extract clip
                             start_time = max(0, result['timestamp_seconds'] - padding_seconds)
                             end_time = result['timestamp_seconds'] + padding_seconds
-                            
-                            st.markdown(f"**Clip Range:** {start_time:.1f}s to {end_time:.1f}s")
                             
                             if st.session_state.video_file_path and os.path.exists(st.session_state.video_file_path):
                                 clips_dir = "extracted_clips"
@@ -907,7 +1406,7 @@ def main():
                                 clip_filename = f"clip_{i}_frame{result['frame_number']}.mp4"
                                 clip_path = os.path.join(clips_dir, clip_filename)
                                 
-                                with st.spinner(f"Extracting clip {i}..."):
+                                with st.spinner("Extracting clip..."):
                                     success = extract_video_clip(
                                         st.session_state.video_file_path,
                                         start_time,
@@ -916,24 +1415,24 @@ def main():
                                     )
                                 
                                 if success:
-                                    st.video(clip_path)
+                                    col1, col2, col3 = st.columns([1, 3, 1])
+                                    with col2:
+                                        st.markdown('<div class="video-container">', unsafe_allow_html=True)
+                                        st.video(clip_path)
+                                        st.markdown('</div>', unsafe_allow_html=True)
                                     
-                                    with open(clip_path, 'rb') as f:
-                                        st.download_button(
-                                            f"📥 Download Clip {i}",
-                                            f,
-                                            file_name=clip_filename,
-                                            mime="video/mp4",
-                                            key=f"download_embed_{i}"
-                                        )
-                                else:
-                                    st.error("Failed to extract clip")
-                            else:
-                                st.warning("Video file not found. Upload video again to extract clips.")
-                        
-                        st.markdown("---")
+                                    st.download_button(
+                                        f"📥 Download Clip {i}",
+                                        open(clip_path, 'rb'),
+                                        file_name=clip_filename,
+                                        mime="video/mp4",
+                                        key=f"download_embed_{i}",
+                                        use_container_width=True
+                                    )
+                            
+                            st.markdown("---")
                 
-                # TEXT SEARCH WITH FLEXIBLE TIME RANGES
+                # TEXT SEARCH
                 else:
                     response = search_by_text_flexible(
                         query,
@@ -942,24 +1441,23 @@ def main():
                         st.session_state.text_tokenizer
                     )
                     
-                    st.markdown("### 📊 Search Results (Text-Based with Time Ranges)")
-                    st.markdown(response)
+                    st.markdown("### 📊 Search Results")
+                    st.info(response)
                     
-                    # Extract frame numbers from response
+                    # Show clips for mentioned frames
                     frame_matches = re.findall(r'[Ff]rame\s+(\d+)', response)
                     
                     if frame_matches:
-                        st.markdown("---")
-                        st.markdown("### 🎬 Video Clips for Mentioned Frames:")
+                        st.markdown("### 🎬 Relevant Clips")
                         
                         frames = st.session_state.video_data['frames']
-                        for frame_num_str in set(frame_matches):
+                        for frame_num_str in set(frame_matches)[:3]:
                             frame_num = int(frame_num_str)
                             
                             matching_frame = next((f for f in frames if f['frame_number'] == frame_num), None)
                             
                             if matching_frame and st.session_state.video_file_path:
-                                st.markdown(f"**Frame {frame_num} ({matching_frame['timestamp_formatted']})**")
+                                st.markdown(f"**Frame {frame_num}** • {matching_frame['timestamp_formatted']}")
                                 
                                 start_time = max(0, matching_frame['timestamp_seconds'] - padding_seconds)
                                 end_time = matching_frame['timestamp_seconds'] + padding_seconds
@@ -978,246 +1476,22 @@ def main():
                                 )
                                 
                                 if success:
-                                    st.video(clip_path)
+                                    col1, col2, col3 = st.columns([1, 3, 1])
+                                    with col2:
+                                        st.markdown('<div class="video-container">', unsafe_allow_html=True)
+                                        st.video(clip_path)
+                                        st.markdown('</div>', unsafe_allow_html=True)
                                     
-                                    with open(clip_path, 'rb') as f:
-                                        st.download_button(
-                                            f"📥 Download Frame {frame_num} Clip",
-                                            f,
-                                            file_name=clip_filename,
-                                            mime="video/mp4",
-                                            key=f"download_text_{frame_num}"
-                                        )
-    
-    # =========================================================================
-    # TAB 3: 10-SECOND CLIP Q&A (NEW - UPDATED)
-    # =========================================================================
-    with tab3:
-        st.markdown("### 📂 Load Video Analysis")
-        uploaded_json_chat = st.file_uploader("Upload existing JSON analysis (optional)", type=['json'], key="json_uploader_chat")
-        if uploaded_json_chat:
-            loaded_data = json.load(uploaded_json_chat)
-            st.session_state.video_data = loaded_data
-            if 'video_path' in loaded_data and os.path.exists(loaded_data['video_path']):
-                st.session_state.video_file_path = loaded_data['video_path']
-            st.success(f"✓ Loaded: {loaded_data['video_name']} ({loaded_data['total_frames']} frames)")
-        
-        if st.session_state.video_data is None:
-            st.warning("⚠️ Please analyze a video first or upload a JSON file")
-        else:
-            st.success(f"✓ Loaded: {st.session_state.video_data['video_name']}")
-            st.info(f"📊 {st.session_state.video_data['total_frames']} frames available")
-            
-            if 'text_model' not in st.session_state:
-                with st.spinner("Loading chat model..."):
-                    text_model, text_tokenizer = load_text_model()
-                    st.session_state.text_model = text_model
-                    st.session_state.text_tokenizer = text_tokenizer
-                st.success("✓ Chat model loaded!")
-            
-            st.markdown("---")
-            
-            # =================================================================
-            # 10-SECOND CLIP SELECTION
-            # =================================================================
-            st.subheader("🎬 Select 10-Second Clip")
-            
-            frames = st.session_state.video_data['frames']
-            max_time = max([f['timestamp_seconds'] for f in frames])
-            
-            col1, col2, col3 = st.columns([2, 2, 1])
-            
-            with col1:
-                start_time = st.number_input(
-                    "Start Time (seconds)",
-                    min_value=0.0,
-                    max_value=max_time,
-                    value=0.0,
-                    step=1.0,
-                    format="%.1f"
-                )
-            
-            with col2:
-                clip_duration = st.number_input(
-                    "Clip Duration (seconds)",
-                    min_value=5.0,
-                    max_value=30.0,
-                    value=10.0,
-                    step=1.0,
-                    format="%.1f"
-                )
-            
-            end_time = min(start_time + clip_duration, max_time)
-            
-            with col3:
-                st.markdown("**End Time:**")
-                st.markdown(f"# {end_time:.1f}s")
-            
-            frames_in_window = len([f for f in frames if start_time <= f['timestamp_seconds'] <= end_time])
-            st.info(f"📊 This {clip_duration}s clip contains **{frames_in_window} analyzed frames**")
-            
-            # Quick presets
-            st.markdown("**Quick Presets:**")
-            preset_col1, preset_col2, preset_col3, preset_col4 = st.columns(4)
-            
-            with preset_col1:
-                if st.button("⏮️ Beginning (0-10s)"):
-                    st.session_state.current_clip_time = (0.0, 10.0)
-                    st.session_state.clip_chat_history = []
-                    st.rerun()
-            
-            with preset_col2:
-                mid_point = max_time / 2
-                if st.button(f"⏸️ Middle ({mid_point-5:.0f}-{mid_point+5:.0f}s)"):
-                    st.session_state.current_clip_time = (mid_point - 5, mid_point + 5)
-                    st.session_state.clip_chat_history = []
-                    st.rerun()
-            
-            with preset_col3:
-                if st.button(f"⏭️ End ({max_time-10:.0f}-{max_time:.0f}s)"):
-                    st.session_state.current_clip_time = (max(0, max_time - 10), max_time)
-                    st.session_state.clip_chat_history = []
-                    st.rerun()
-            
-            with preset_col4:
-                if st.button("🎬 Load Custom Clip", type="primary"):
-                    st.session_state.current_clip_time = (start_time, end_time)
-                    st.session_state.clip_chat_history = []
-                    st.rerun()
-            
-            # =================================================================
-            # SHOW CLIP & QA
-            # =================================================================
-            if st.session_state.current_clip_time:
-                clip_start, clip_end = st.session_state.current_clip_time
-                
-                st.markdown("---")
-                st.markdown(f"## 🎥 Current Clip: {clip_start:.1f}s - {clip_end:.1f}s ({clip_end - clip_start:.1f}s)")
-                
-                # Show video clip
-                if st.session_state.video_file_path and os.path.exists(st.session_state.video_file_path):
-                    st.markdown("### 📹 Video Clip")
-                    
-                    clips_dir = "extracted_clips"
-                    os.makedirs(clips_dir, exist_ok=True)
-                    
-                    clip_filename = f"clip_{clip_start:.0f}_{clip_end:.0f}.mp4"
-                    clip_path = os.path.join(clips_dir, clip_filename)
-                    
-                    with st.spinner("Extracting clip..."):
-                        success = extract_video_clip(
-                            st.session_state.video_file_path,
-                            clip_start,
-                            clip_end,
-                            clip_path
-                        )
-                    
-                    if success:
-                        st.video(clip_path)
-                        
-                        with open(clip_path, 'rb') as f:
-                            st.download_button(
-                                "📥 Download This Clip",
-                                f,
-                                file_name=clip_filename,
-                                mime="video/mp4"
-                            )
-                    else:
-                        st.warning("Could not extract video clip, but you can still ask questions!")
-                else:
-                    st.warning("⚠️ Video file not available. You can still ask questions based on frame descriptions!")
-                
-                # Show frame descriptions
-                st.markdown("---")
-                st.markdown("### 📝 Frame Descriptions in This Clip")
-                
-                clip_frames = [f for f in frames if clip_start <= f['timestamp_seconds'] <= clip_end]
-                
-                if clip_frames:
-                    for frame in clip_frames:
-                        with st.expander(f"Frame {frame['frame_number']} at {frame['timestamp_formatted']} ({frame['timestamp_seconds']}s)"):
-                            st.markdown(frame['description'])
-                else:
-                    st.warning("No analyzed frames in this time window.")
-                
-                st.markdown("---")
-                
-                # =============================================================
-                # Q&A INTERFACE
-                # =============================================================
-                st.markdown("### 💬 Ask Questions About This Clip")
-                
-                with st.expander("💡 Example Questions"):
-                    st.markdown("""
-                    **About Content:**
-                    - "How is this problem solved?"
-                    - "What equation is shown?"
-                    - "What's the trick mentioned?"
-                    
-                    **Generate Content:**
-                    - "Generate 4 similar questions"
-                    - "Create practice problems like this"
-                    - "Make flashcards from this"
-                    
-                    **Explain:**
-                    - "Show me step-by-step solution"
-                    - "Create a flowchart"
-                    - "Break this down simply"
-                    """)
-                
-                # Display chat history
-                for chat in st.session_state.clip_chat_history:
-                    with st.chat_message("user"):
-                        st.write(chat["question"])
-                    with st.chat_message("assistant"):
-                        st.markdown(chat["answer"])
-                
-                # Chat input
-                user_question = st.chat_input(f"Ask about the {clip_start:.1f}s-{clip_end:.1f}s clip...")
-                
-                if user_question:
-                    with st.chat_message("user"):
-                        st.write(user_question)
-                    
-                    history_str = ""
-                    for chat in st.session_state.clip_chat_history:
-                        history_str += f"USER: {chat['question']}\nASSISTANT: {chat['answer']}\n\n"
-                    
-                    with st.chat_message("assistant"):
-                        with st.spinner("🤔 Analyzing clip..."):
-                            answer = chat_with_video_clip(
-                                user_question,
-                                st.session_state.video_data,
-                                st.session_state.text_model,
-                                st.session_state.text_tokenizer,
-                                clip_start,
-                                clip_end,
-                                history_str
-                            )
-                        st.markdown(answer)
-                    
-                    st.session_state.clip_chat_history.append({
-                        "question": user_question,
-                        "answer": answer
-                    })
-                
-                # Action buttons
-                st.markdown("---")
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    if st.button("🗑️ Clear Chat"):
-                        st.session_state.clip_chat_history = []
-                        st.rerun()
-                
-                with col2:
-                    if st.button("🔄 Select Different Clip"):
-                        st.session_state.current_clip_time = None
-                        st.session_state.clip_chat_history = []
-                        st.rerun()
-            
-            else:
-                st.info("👆 Select a clip above to start asking questions!")
+                                    st.download_button(
+                                        f"📥 Download",
+                                        open(clip_path, 'rb'),
+                                        file_name=clip_filename,
+                                        mime="video/mp4",
+                                        key=f"download_text_{frame_num}",
+                                        use_container_width=True
+                                    )
+                                
+                                st.markdown("---")
 
 
 if __name__ == "__main__":
