@@ -2,14 +2,15 @@
 Embeddings package for semantic video search.
 
 This package provides modular components for:
-- CPU-based model loading (VLM and embedding models)
+- GPU/CPU-based model loading (VLM and embedding models) with auto-detection
 - Video processing and embedding generation
 - Semantic search and query functionality
 """
 
 from .load import (
     load_model,
-    load_embedding_model
+    load_embedding_model,
+    detect_device
 )
 
 from .embed import (
@@ -31,6 +32,7 @@ __all__ = [
     # Model loading
     'load_model',
     'load_embedding_model',
+    'detect_device',
 
     # Embedding generation
     'extract_frames',

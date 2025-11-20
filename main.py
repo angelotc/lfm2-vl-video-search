@@ -14,7 +14,8 @@ from embeddings import (
     process_video,
     search_frames,
     get_frame_timestamp,
-    extract_clip
+    extract_clip,
+    detect_device
 )
 
 
@@ -64,7 +65,7 @@ def download_youtube_video(url, output_path=None):
 
 
 def main():
-    st.set_page_config(page_title="Semantic Video Search", page_icon="🎬", layout="wide")
+    st.set_page_config(page_title="Semantic Video Search", layout="wide")
 
     st.title("Semantic Video Search")
 
@@ -78,10 +79,48 @@ def main():
     if 'youtube_url_hash' not in st.session_state:
         st.session_state.youtube_url_hash = None
 
+    # Device selection at the top
+    st.markdown("---")
+    st.subheader("Device Selection")
+
+    # Auto-detect GPU/CPU
+    detected_device_type, detected_device_name = detect_device()
+
+    # Build device options
+    device_options = ["CPU"]
+    device_mapping = {"CPU": "cpu"}
+
+    if detected_device_type == "cuda":
+        gpu_option = f"GPU ({detected_device_name.split('(')[1].split(')')[0]})"
+        device_options.insert(0, gpu_option)  # Add GPU as first option
+        device_mapping[gpu_option] = "cuda"
+        default_index = 0  # Default to GPU if available
+    else:
+        default_index = 0  # Only CPU available
+        st.info("No GPU detected - CPU will be used")
+
+    # Radio button for device selection
+    selected_device_label = st.radio(
+        "Choose processing device:",
+        options=device_options,
+        index=default_index,
+        horizontal=True,
+        help="GPU provides faster processing if available. CPU is slower but works on all systems."
+    )
+
+    selected_device_type = device_mapping[selected_device_label]
+
+    # Show selected device info
+    if selected_device_type == "cuda":
+        st.info(f"GPU acceleration enabled")
+    else:
+        st.info(f"CPU processing")
+
     # Input method selection
+    st.markdown("---")
     input_method = st.radio(
         "Choose input method:",
-        ["📁 Upload File", "🔗 YouTube URL"],
+        ["Upload File", "YouTube URL"],
         horizontal=True
     )
 
@@ -89,7 +128,7 @@ def main():
     video_path_from_youtube = None
     video_name_from_youtube = None
 
-    if input_method == "📁 Upload File":
+    if input_method == "Upload File":
         # File uploader
         uploaded_file = st.file_uploader("Choose a video file", type=['mov', 'mp4', 'avi', 'mkv'])
         # Clear YouTube video if switching to file upload
@@ -121,12 +160,12 @@ def main():
             embeddings_exist = os.path.exists(hash_json_filename)
 
             if embeddings_exist:
-                st.success(f"🎯 Found existing analysis for this YouTube video!")
-                st.info("💡 You can load the existing analysis without re-downloading the video.")
+                st.success(f"Found existing analysis for this YouTube video!")
+                st.info("You can load the existing analysis without re-downloading the video.")
 
                 col1, col2 = st.columns(2)
                 with col1:
-                    if st.button("📊 Load Existing Analysis", type="primary"):
+                    if st.button("Load Existing Analysis", type="primary"):
                         # Load JSON to get video name
                         with open(hash_json_filename, 'r', encoding='utf-8') as f:
                             existing_data = json.load(f)
@@ -135,16 +174,16 @@ def main():
                         st.session_state.youtube_video_name = existing_data.get('video_name', f'YouTube Video {url_hash}')
                         st.session_state.youtube_url_hash = url_hash
                         # Note: video_path will be None, but we don't need it for search
-                        st.success("✓ Loaded existing analysis!")
+                        st.success("Loaded existing analysis!")
                         st.rerun()
 
                 with col2:
-                    download_anyway = st.button("🔽 Download Video Anyway")
+                    download_anyway = st.button("Download Video Anyway")
             else:
-                download_anyway = st.button("🔽 Download Video", type="primary")
+                download_anyway = st.button("Download Video", type="primary")
 
             if embeddings_exist == False and download_anyway or (embeddings_exist and download_anyway):
-                with st.spinner("⏳ Downloading from YouTube..."):
+                with st.spinner("Downloading from YouTube..."):
                     downloaded_path, downloaded_name = download_youtube_video(youtube_url)
 
                 if downloaded_path:
@@ -152,7 +191,7 @@ def main():
                     st.session_state.youtube_video_path = downloaded_path
                     st.session_state.youtube_video_name = downloaded_name
                     st.session_state.youtube_url_hash = url_hash
-                    st.success(f"✓ Downloaded: {downloaded_name}")
+                    st.success(f"Downloaded: {downloaded_name}")
                     st.rerun()  # Rerun to update the UI
 
         # Use session state values - ALWAYS display if available
@@ -161,12 +200,12 @@ def main():
             video_name_from_youtube = st.session_state.youtube_video_name
 
             if video_path_from_youtube:
-                st.info(f"📹 Video loaded: {video_name_from_youtube}")
+                st.info(f"Video loaded: {video_name_from_youtube}")
                 st.video(video_path_from_youtube)
             elif st.session_state.youtube_url_hash:
                 # Embeddings loaded without video file
-                st.info(f"📊 Using existing embeddings: {video_name_from_youtube}")
-                st.info("💡 Video file not downloaded (embeddings only mode)")
+                st.info(f"Using existing embeddings: {video_name_from_youtube}")
+                st.info("Video file not downloaded (embeddings only mode)")
 
     # Determine which video source to use
     # Video is ready if we have an uploaded file, downloaded YouTube video, OR loaded YouTube embeddings
@@ -180,9 +219,6 @@ def main():
             current_video_name = uploaded_file.name
         else:
             current_video_name = video_name_from_youtube
-
-        # CPU-only processing (no device selection needed)
-        selected_device_type = "cpu"
 
         # Check if JSON already exists
         output_dir = "video_frames_analysis"
@@ -203,14 +239,14 @@ def main():
                 existing_data = json.load(f)
 
             if video_path_from_youtube:
-                st.success(f"✓ Found existing analysis for this YouTube video ({existing_data['total_frames']} frames)")
-                st.info(f"📁 Using cached embeddings: yt_{st.session_state.youtube_url_hash}.json")
+                st.success(f"Found existing analysis for this YouTube video ({existing_data['total_frames']} frames)")
+                st.info(f"Using cached embeddings: yt_{st.session_state.youtube_url_hash}.json")
             else:
                 base_name = Path(current_video_name).stem
-                st.success(f"✓ Found existing analysis: {base_name}.json ({existing_data['total_frames']} frames)")
+                st.success(f"Found existing analysis: {base_name}.json ({existing_data['total_frames']} frames)")
 
             # Show existing results
-            with st.expander("📊 View All Frames", expanded=False):
+            with st.expander("View All Frames", expanded=False):
                 for frame in existing_data['frames']:
                     col1, col2 = st.columns([1, 4])
                     with col1:
@@ -233,7 +269,7 @@ def main():
                 top_k = st.number_input("Top results", min_value=1, max_value=20, value=5)
 
             # Clip settings
-            with st.expander("⚙️ Clip Settings"):
+            with st.expander("Clip Settings"):
                 padding_seconds = st.slider(
                     "Padding (seconds before/after match)",
                     min_value=0.0,
@@ -244,15 +280,15 @@ def main():
                 )
 
             if query:
-                # Load embedding model for search
+                # Load embedding model for search (use same device as VLM)
                 with st.spinner("Loading embedding model..."):
-                    embedding_model = load_embedding_model()
+                    embedding_model = load_embedding_model(device_type=selected_device_type)
 
                 # Perform search
                 try:
                     results = search_frames(query, json_filename, embedding_model, top_k)
 
-                    st.markdown(f"### 📊 Top {len(results)} Results for: '{query}'")
+                    st.markdown(f"### Top {len(results)} Results for: '{query}'")
 
                     # Save video temporarily for clip extraction
                     clips_dir = "extracted_clips"
@@ -278,8 +314,8 @@ def main():
                         fps = cap.get(cv2.CAP_PROP_FPS)
                         cap.release()
                     else:
-                        st.warning("⚠️ Video file not available - showing search results without video clips")
-                        st.info("💡 To extract clips, download the video first")
+                        st.warning("Video file not available - showing search results without video clips")
+                        st.info("To extract clips, download the video first")
 
                     # Display results
                     for i, result in enumerate(results, 1):
@@ -321,7 +357,7 @@ def main():
                                         # Verify clip exists
                                         if os.path.exists(clip_path):
                                             file_size = os.path.getsize(clip_path)
-                                            st.success(f"✓ Clip created: {file_size / 1024:.1f} KB")
+                                            st.success(f"Clip created: {file_size / 1024:.1f} KB")
 
                                             # Display video
                                             st.video(clip_path)
@@ -329,7 +365,7 @@ def main():
                                             # Download button
                                             with open(clip_path, 'rb') as clip_file:
                                                 st.download_button(
-                                                    label=f"📥 Download Clip {i}",
+                                                    label=f"Download Clip {i}",
                                                     data=clip_file,
                                                     file_name=clip_filename,
                                                     mime="video/mp4",
@@ -340,7 +376,7 @@ def main():
                                     else:
                                         st.error("Failed to extract clip (see errors above)")
                                 else:
-                                    st.info("📹 Video clip not available (embeddings only mode)")
+                                    st.info("Video clip not available (embeddings only mode)")
 
                             st.markdown("---")
 
@@ -349,7 +385,7 @@ def main():
 
             # Ask if user wants to re-process
             st.markdown("---")
-            st.warning("⚠️ Want to re-process this video?")
+            st.warning("Want to re-process this video?")
             reprocess = st.checkbox("Yes, re-process this video")
 
             if not reprocess:
@@ -357,8 +393,8 @@ def main():
 
 
         # Performance settings
-        with st.expander("⚙️ Performance Settings"):
-            st.info("ℹ️ Batch size controls checkpoint frequency. Higher values = fewer saves, but all frames are processed individually to save memory.")
+        with st.expander("Performance Settings"):
+            st.info("Batch size controls checkpoint frequency. Higher values = fewer saves, but all frames are processed individually to save memory.")
 
             col1, col2 = st.columns(2)
             with col1:
@@ -381,19 +417,17 @@ def main():
             # Frame fusion option
             st.markdown("---")
             fuse_frames = st.checkbox(
-                "⚡ Enable Frame Fusion (~3x speedup)",
+                "Enable Frame Fusion (~3x speedup)",
                 value=False,
                 help="Combine 3 temporal frames into a single composite image. Reduces processing time by ~3x but may slightly affect description quality."
             )
             if fuse_frames:
-                st.success("✅ Frame fusion enabled: Processing 1 image per frame instead of 3")
+                st.success("Frame fusion enabled: Processing 1 image per frame instead of 3")
             else:
-                st.info("ℹ️ Standard mode: Processing 3 images per frame (before, current, after)")
-
-            st.success("✅ CPU-based processing: Each frame processed individually")
+                st.info("Standard mode: Processing 3 images per frame (before, current, after)")
 
         # Start button
-        if st.button("🚀 Create Embeddings", type="primary"):
+        if st.button("Create Embeddings", type="primary"):
             # Determine video path
             if video_path_from_youtube:
                 # Use YouTube video directly
@@ -407,14 +441,15 @@ def main():
             output_dir = "video_frames_analysis"
             os.makedirs(output_dir, exist_ok=True)
 
-            # Load models
-            with st.spinner("Loading vision-language model on CPU..."):
-                model, processor, device_config = load_model(device_type="cpu")
-            st.success("✓ VLM loaded on CPU!")
+            # Load models with selected device
+            device_name_display = "GPU" if selected_device_type == "cuda" else "CPU"
+            with st.spinner(f"Loading vision-language model on {device_name_display}..."):
+                model, processor, device_config = load_model(device_type=selected_device_type)
+            st.success(f"VLM loaded on {device_name_display}!")
 
-            with st.spinner("Loading embedding model..."):
-                embedding_model = load_embedding_model()
-            st.success("✓ Embedding model loaded!")
+            with st.spinner(f"Loading embedding model on {device_name_display}..."):
+                embedding_model = load_embedding_model(device_type=selected_device_type)
+            st.success(f"Embedding model loaded on {device_name_display}!")
 
             # Process video with performance settings and incremental saving
             result = process_video(
@@ -433,11 +468,11 @@ def main():
 
             if result:
                 results, json_filename = result
-                st.success(f"✓ Saved to: {json_filename}")
+                st.success(f"Saved to: {json_filename}")
 
                 # Display results
                 st.markdown("---")
-                st.header("📊 Results")
+                st.header("Results")
 
                 # Show as table
                 for frame in results:
@@ -456,7 +491,7 @@ def main():
                 }
                 json_str = json.dumps(output_data, indent=4)
                 st.download_button(
-                    label="📥 Download JSON",
+                    label="Download JSON",
                     data=json_str,
                     file_name="video_analysis.json",
                     mime="application/json"
@@ -465,6 +500,10 @@ def main():
                 # Clean up temp file (but not YouTube downloads)
                 if not video_path_from_youtube:
                     os.unlink(video_path)
+
+                # Rerun to show search interface
+                st.success("Processing complete! Reloading to show search interface...")
+                st.rerun()
     
 
 if __name__ == "__main__":
