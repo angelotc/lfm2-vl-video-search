@@ -377,6 +377,19 @@ def main():
                     value=1,
                     help="Number of parallel workers (currently not used)"
                 )
+
+            # Frame fusion option
+            st.markdown("---")
+            fuse_frames = st.checkbox(
+                "⚡ Enable Frame Fusion (~3x speedup)",
+                value=False,
+                help="Combine 3 temporal frames into a single composite image. Reduces processing time by ~3x but may slightly affect description quality."
+            )
+            if fuse_frames:
+                st.success("✅ Frame fusion enabled: Processing 1 image per frame instead of 3")
+            else:
+                st.info("ℹ️ Standard mode: Processing 3 images per frame (before, current, after)")
+
             st.success("✅ CPU-based processing: Each frame processed individually")
 
         # Start button
@@ -414,7 +427,8 @@ def main():
                 device_config=device_config,
                 batch_size=batch_size,
                 max_workers=max_workers,
-                save_interval=8
+                save_interval=2,
+                fuse_frames=fuse_frames
             )
 
             if result:
