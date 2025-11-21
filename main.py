@@ -38,13 +38,14 @@ def download_youtube_video(url, output_path=None):
 
     Args:
         url: YouTube video URL
-        output_path: Directory to save video (creates temp dir if None)
+        output_path: Directory to save video (saves to youtube_downloads if None)
 
     Returns:
         tuple: (video_path, video_title) or (None, None) on error
     """
     if output_path is None:
-        output_path = tempfile.mkdtemp()
+        output_path = "videos"
+        os.makedirs(output_path, exist_ok=True)
 
     ydl_opts = {
         'format': 'best[ext=mp4]',
@@ -68,6 +69,11 @@ def main():
     st.set_page_config(page_title="Semantic Video Search", layout="wide")
 
     st.title("Semantic Video Search")
+
+    # Create necessary directories
+    os.makedirs("videos", exist_ok=True)
+    os.makedirs("video_frames_analysis", exist_ok=True)
+    os.makedirs("extracted_clips", exist_ok=True)
 
     # Initialize session state for YouTube video
     if 'youtube_video_path' not in st.session_state:
@@ -120,13 +126,15 @@ def main():
     st.markdown("---")
     input_method = st.radio(
         "Choose input method:",
-        ["Upload File", "YouTube URL"],
+        ["Upload File", "YouTube URL", "Search From Existing Catalog"],
         horizontal=True
     )
 
     uploaded_file = None
     video_path_from_youtube = None
     video_name_from_youtube = None
+    existing_analysis_loaded = False
+    existing_json_path = None
 
     if input_method == "Upload File":
         # File uploader
@@ -135,7 +143,7 @@ def main():
         if st.session_state.youtube_video_path is not None:
             st.session_state.youtube_video_path = None
             st.session_state.youtube_video_name = None
-    else:
+    elif input_method == "YouTube URL":
         # YouTube URL input - use session state to persist the URL
         youtube_url = st.text_input(
             "Enter YouTube URL:",
@@ -154,7 +162,6 @@ def main():
 
             # Check if embeddings already exist for this URL
             output_dir = "video_frames_analysis"
-            os.makedirs(output_dir, exist_ok=True)
             hash_json_filename = os.path.join(output_dir, f"yt_{url_hash}.json")
 
             embeddings_exist = os.path.exists(hash_json_filename)
@@ -192,6 +199,8 @@ def main():
                     st.session_state.youtube_video_name = downloaded_name
                     st.session_state.youtube_url_hash = url_hash
                     st.success(f"Downloaded: {downloaded_name}")
+                    st.info(f"Video saved to: {downloaded_path}")
+                    st.info("✅ All videos are now saved permanently in videos/ directory")
                     st.rerun()  # Rerun to update the UI
 
         # Use session state values - ALWAYS display if available
@@ -207,40 +216,97 @@ def main():
                 st.info(f"Using existing embeddings: {video_name_from_youtube}")
                 st.info("Video file not downloaded (embeddings only mode)")
 
+    elif input_method == "Search From Existing Catalog":
+        # Show available JSON files
+        st.subheader("Select Existing Analysis")
+
+        # Get all JSON files in the analysis directory
+        output_dir = "video_frames_analysis"
+
+        json_files = [f for f in os.listdir(output_dir) if f.endswith('.json')]
+
+        if not json_files:
+            st.warning("No existing analysis files found. Please process a video first.")
+            st.stop()
+
+        # Create a dropdown to select which JSON file to use
+        selected_json = st.selectbox(
+            "Choose analysis file:",
+            json_files,
+            help="Select a previously generated video analysis to search through"
+        )
+
+        if selected_json:
+            existing_json_path = os.path.join(output_dir, selected_json)
+
+            # Load and display info about the selected analysis
+            try:
+                with open(existing_json_path, 'r', encoding='utf-8') as f:
+                    existing_data = json.load(f)
+
+                video_name = existing_data.get('video_name', selected_json)
+                total_frames = existing_data.get('total_frames', 0)
+                status = existing_data.get('status', 'unknown')
+
+                st.success(f"Loaded: {video_name}")
+                st.info(f"Frames: {total_frames} | Status: {status}")
+
+                # Set variables for search interface
+                existing_analysis_loaded = True
+                current_video_name = video_name
+
+                # Set json_filename for search functionality
+                json_filename = existing_json_path
+
+            except Exception as e:
+                st.error(f"Error loading analysis file: {e}")
+                st.stop()
+
     # Determine which video source to use
-    # Video is ready if we have an uploaded file, downloaded YouTube video, OR loaded YouTube embeddings
+    # Video is ready if we have an uploaded file, downloaded YouTube video, loaded YouTube embeddings, OR existing analysis
     video_ready = (uploaded_file is not None or
                    video_path_from_youtube is not None or
-                   st.session_state.youtube_url_hash is not None)
+                   st.session_state.youtube_url_hash is not None or
+                   existing_analysis_loaded)
 
     if video_ready:
         # Set current video name for both sources
         if uploaded_file is not None:
             current_video_name = uploaded_file.name
-        else:
+        elif video_path_from_youtube or st.session_state.youtube_url_hash:
             current_video_name = video_name_from_youtube
+        # For existing analysis, current_video_name and json_filename are already set above
 
-        # Check if JSON already exists
-        output_dir = "video_frames_analysis"
-        os.makedirs(output_dir, exist_ok=True)
+        # For existing analysis, skip the JSON detection logic
+        if not existing_analysis_loaded:
+            # Check if JSON already exists
+            output_dir = "video_frames_analysis"
+            os.makedirs(output_dir, exist_ok=True)
 
-        # For YouTube videos, use URL hash as filename; for uploads, use video name
-        if video_path_from_youtube and st.session_state.youtube_url_hash:
-            json_filename = os.path.join(output_dir, f"yt_{st.session_state.youtube_url_hash}.json")
+            # For YouTube videos, use URL hash as filename; for uploads, use video name
+            if video_path_from_youtube and st.session_state.youtube_url_hash:
+                json_filename = os.path.join(output_dir, f"yt_{st.session_state.youtube_url_hash}.json")
+            else:
+                base_name = Path(current_video_name).stem
+                json_filename = os.path.join(output_dir, f"{base_name}.json")
+
+            json_exists = os.path.exists(json_filename)
         else:
-            base_name = Path(current_video_name).stem
-            json_filename = os.path.join(output_dir, f"{base_name}.json")
-
-        json_exists = os.path.exists(json_filename)
+            # For existing analysis, we already have json_filename and the data is loaded
+            json_exists = True
+            existing_data = json.load(open(existing_json_path, 'r', encoding='utf-8'))
 
         if json_exists:
-            # Load existing analysis
-            with open(json_filename, 'r', encoding='utf-8') as f:
-                existing_data = json.load(f)
+            # Load existing analysis (only if not already loaded)
+            if not existing_analysis_loaded:
+                with open(json_filename, 'r', encoding='utf-8') as f:
+                    existing_data = json.load(f)
 
             if video_path_from_youtube:
                 st.success(f"Found existing analysis for this YouTube video ({existing_data['total_frames']} frames)")
                 st.info(f"Using cached embeddings: yt_{st.session_state.youtube_url_hash}.json")
+            elif existing_analysis_loaded:
+                st.success(f"Loaded from catalog: {selected_json} ({existing_data['total_frames']} frames)")
             else:
                 base_name = Path(current_video_name).stem
                 st.success(f"Found existing analysis: {base_name}.json ({existing_data['total_frames']} frames)")
@@ -292,18 +358,40 @@ def main():
 
                     # Save video temporarily for clip extraction
                     clips_dir = "extracted_clips"
-                    os.makedirs(clips_dir, exist_ok=True)
+                    # clips_dir already created in main()
 
                     # Check if we have access to video file for clip extraction
                     video_path = None
+                    videos_dir = "videos"
+                    # videos_dir already created in main()
+
                     if video_path_from_youtube:
                         video_path = video_path_from_youtube
                     elif uploaded_file:
-                        video_path = os.path.join(clips_dir, f"temp_{uploaded_file.name}")
-                        if not os.path.exists(video_path):
+                        # Look for video in videos directory first
+                        potential_video_path = os.path.join(videos_dir, uploaded_file.name)
+                        if os.path.exists(potential_video_path):
+                            video_path = potential_video_path
+                        else:
+                            # Save to videos directory permanently
                             uploaded_file.seek(0)
-                            with open(video_path, 'wb') as f:
+                            with open(potential_video_path, 'wb') as f:
                                 f.write(uploaded_file.read())
+                            video_path = potential_video_path
+                    else:
+                        # For existing analysis, try to find matching video in videos directory
+                        if existing_analysis_loaded and current_video_name:
+                            potential_video_path = os.path.join(videos_dir, current_video_name)
+                            if os.path.exists(potential_video_path):
+                                video_path = potential_video_path
+                            else:
+                                # Try without extension
+                                base_name = Path(current_video_name).stem
+                                for ext in ['.mp4', '.avi', '.mov', '.mkv']:
+                                    potential_video_path = os.path.join(videos_dir, base_name + ext)
+                                    if os.path.exists(potential_video_path):
+                                        video_path = potential_video_path
+                                        break
 
                     # Determine if we can extract clips
                     can_extract_clips = video_path is not None and os.path.exists(video_path)
@@ -314,8 +402,12 @@ def main():
                         fps = cap.get(cv2.CAP_PROP_FPS)
                         cap.release()
                     else:
-                        st.warning("Video file not available - showing search results without video clips")
-                        st.info("To extract clips, download the video first")
+                        if existing_analysis_loaded:
+                            st.warning("Video file not available in videos/ directory - showing search results without video clips")
+                            st.info("Add the matching video file to the videos/ directory to enable clip extraction")
+                        else:
+                            st.warning("Video file not available - showing search results without video clips")
+                            st.info("Upload or download the video to the videos/ directory to enable clip extraction")
 
                     # Display results
                     for i, result in enumerate(results, 1):
@@ -337,46 +429,83 @@ def main():
 
                                 st.markdown(f"**Timestamp:** {frame_timestamp:.2f}s")
 
-                                # Only extract clip if we have video file
+                                # Only show video options if we have video file
                                 if can_extract_clips:
-                                    # Calculate clip times
-                                    start_time = max(0, frame_timestamp - padding_seconds)
-                                    end_time = frame_timestamp + padding_seconds
+                                    # Video display options
+                                    video_display_mode = st.radio(
+                                        "Video display:",
+                                        ["Full Video (at timestamp)", "Extract Clip"],
+                                        key=f"display_mode_{i}",
+                                        horizontal=True
+                                    )
 
-                                    st.markdown(f"**Clip Range:** {start_time:.2f}s - {end_time:.2f}s")
+                                    if video_display_mode == "Full Video (at timestamp)":
+                                        # Show full video starting at the matched frame timestamp
+                                        st.markdown(f"**Playing from:** {frame_timestamp:.2f}s")
+                                        st.video(video_path, start_time=int(frame_timestamp))
 
-                                    # Extract clip
-                                    clip_filename = f"clip_{i}_frame{result['frame_number']}_{query.replace(' ', '_')[:20]}.mp4"
-                                    clip_path = os.path.join(clips_dir, clip_filename)
+                                    else:  # Extract Clip
+                                        # Adjustable clip time controls
+                                        st.markdown("**Adjust Clip Times:**")
+                                        clip_col1, clip_col2 = st.columns(2)
 
-                                    # Show extraction info
-                                    with st.spinner(f"Extracting clip {i}..."):
-                                        success = extract_clip(video_path, start_time, end_time, clip_path)
+                                        with clip_col1:
+                                            clip_start = st.number_input(
+                                                "Start time (s)",
+                                                min_value=0.0,
+                                                max_value=frame_timestamp,
+                                                value=max(0, frame_timestamp - padding_seconds),
+                                                step=0.5,
+                                                key=f"clip_start_{i}"
+                                            )
 
-                                    if success:
-                                        # Verify clip exists
-                                        if os.path.exists(clip_path):
-                                            file_size = os.path.getsize(clip_path)
-                                            st.success(f"Clip created: {file_size / 1024:.1f} KB")
+                                        with clip_col2:
+                                            clip_end = st.number_input(
+                                                "End time (s)",
+                                                min_value=frame_timestamp,
+                                                value=frame_timestamp + padding_seconds,
+                                                step=0.5,
+                                                key=f"clip_end_{i}"
+                                            )
 
-                                            # Display video
-                                            st.video(clip_path)
+                                        st.markdown(f"**Clip Duration:** {clip_end - clip_start:.2f}s")
 
-                                            # Download button
-                                            with open(clip_path, 'rb') as clip_file:
-                                                st.download_button(
-                                                    label=f"Download Clip {i}",
-                                                    data=clip_file,
-                                                    file_name=clip_filename,
-                                                    mime="video/mp4",
-                                                    key=f"download_{i}"
-                                                )
-                                        else:
-                                            st.error(f"Clip file not found: {clip_path}")
-                                    else:
-                                        st.error("Failed to extract clip (see errors above)")
+                                        # Extract clip button
+                                        if st.button(f"Extract Clip", key=f"extract_btn_{i}"):
+                                            clip_filename = f"clip_{i}_frame{result['frame_number']}_{query.replace(' ', '_')[:20]}.mp4"
+                                            clip_path = os.path.join(clips_dir, clip_filename)
+
+                                            # Show extraction info
+                                            with st.spinner(f"Extracting clip {i}..."):
+                                                success = extract_clip(video_path, clip_start, clip_end, clip_path)
+
+                                            if success:
+                                                # Verify clip exists
+                                                if os.path.exists(clip_path):
+                                                    file_size = os.path.getsize(clip_path)
+                                                    st.success(f"Clip created: {file_size / 1024:.1f} KB")
+
+                                                    # Display video
+                                                    st.video(clip_path)
+
+                                                    # Download button
+                                                    with open(clip_path, 'rb') as clip_file:
+                                                        st.download_button(
+                                                            label=f"Download Clip {i}",
+                                                            data=clip_file,
+                                                            file_name=clip_filename,
+                                                            mime="video/mp4",
+                                                            key=f"download_{i}"
+                                                        )
+                                                else:
+                                                    st.error(f"Clip file not found: {clip_path}")
+                                            else:
+                                                st.error("Failed to extract clip (see errors above)")
                                 else:
-                                    st.info("Video clip not available (embeddings only mode)")
+                                    if existing_analysis_loaded:
+                                        st.info("Video clip not available (add video to videos/ directory)")
+                                    else:
+                                        st.info("Video clip not available (embeddings only mode)")
 
                             st.markdown("---")
 
