@@ -85,42 +85,102 @@ def main():
     if 'youtube_url_hash' not in st.session_state:
         st.session_state.youtube_url_hash = None
 
-    # Device selection at the top
+    # Initialize session state for E2B sandbox (cloud mode)
+    if 'e2b_sandbox' not in st.session_state:
+        st.session_state.e2b_sandbox = None
+
+    # Processing Mode Selection
     st.markdown("---")
-    st.subheader("Device Selection")
+    st.subheader("Processing Mode")
 
-    # Auto-detect GPU/CPU
-    detected_device_type, detected_device_name = detect_device()
-
-    # Build device options
-    device_options = ["CPU"]
-    device_mapping = {"CPU": "cpu"}
-
-    if detected_device_type == "cuda":
-        gpu_option = f"GPU ({detected_device_name.split('(')[1].split(')')[0]})"
-        device_options.insert(0, gpu_option)  # Add GPU as first option
-        device_mapping[gpu_option] = "cuda"
-        default_index = 0  # Default to GPU if available
-    else:
-        default_index = 0  # Only CPU available
-        st.info("No GPU detected - CPU will be used")
-
-    # Radio button for device selection
-    selected_device_label = st.radio(
-        "Choose processing device:",
-        options=device_options,
-        index=default_index,
+    processing_mode = st.radio(
+        "Choose where to process:",
+        options=["Local", "Cloud (E2B + Groq + MongoDB)"],
+        index=0,
         horizontal=True,
-        help="GPU provides faster processing if available. CPU is slower but works on all systems."
+        help="Local: Process on your computer (CPU/GPU). Cloud: Process using E2B sandboxes with Groq VLM (faster, requires API keys)"
     )
 
-    selected_device_type = device_mapping[selected_device_label]
+    is_cloud_mode = processing_mode == "Cloud (E2B + Groq + MongoDB)"
 
-    # Show selected device info
-    if selected_device_type == "cuda":
-        st.info(f"GPU acceleration enabled")
-    else:
-        st.info(f"CPU processing")
+    # Device selection - only show for LOCAL mode
+    selected_device_type = "cpu"  # Default
+    if not is_cloud_mode:
+        # Auto-detect GPU/CPU
+        detected_device_type, detected_device_name = detect_device()
+
+        # Build device options
+        device_options = ["CPU"]
+        device_mapping = {"CPU": "cpu"}
+
+        if detected_device_type == "cuda":
+            gpu_option = f"GPU ({detected_device_name.split('(')[1].split(')')[0]})"
+            device_options.insert(0, gpu_option)  # Add GPU as first option
+            device_mapping[gpu_option] = "cuda"
+            default_index = 0  # Default to GPU if available
+        else:
+            default_index = 0  # Only CPU available
+
+        # Radio button for device selection
+        selected_device_label = st.radio(
+            "Choose processing device:",
+            options=device_options,
+            index=default_index,
+            horizontal=True,
+            help="GPU provides faster processing if available. CPU is slower but works on all systems."
+        )
+
+        selected_device_type = device_mapping[selected_device_label]
+
+        # Show selected device info
+        if detected_device_type == "cuda":
+            if selected_device_type == "cuda":
+                st.success(f"✓ GPU acceleration enabled: {detected_device_name}")
+            else:
+                st.info(f"💻 CPU processing (GPU available but not selected)")
+        else:
+            st.warning("⚠ No GPU detected - using CPU")
+
+    # Check for required environment variables in cloud mode
+    if is_cloud_mode:
+        import dotenv
+        dotenv.load_dotenv()
+
+        missing_vars = []
+        e2b_key = os.getenv("E2B_API_KEY", "").strip()
+        groq_key = os.getenv("GROQ_API_KEY", "").strip()
+        mongodb_uri = os.getenv("MONGODB_URI", "").strip()
+
+        if not e2b_key or e2b_key == "your_e2b_api_key_here":
+            missing_vars.append("E2B_API_KEY")
+        if not groq_key or groq_key == "your_groq_api_key_here":
+            missing_vars.append("GROQ_API_KEY")
+        if not mongodb_uri or mongodb_uri == "your_mongodb_connection_string_here":
+            missing_vars.append("MONGODB_URI")
+
+        if missing_vars:
+            st.error(f"❌ Missing or invalid environment variables: {', '.join(missing_vars)}")
+            st.info("Please add valid API keys to your .env file. See .env.example for format.")
+            st.info("📖 E2B API Key: https://e2b.dev/docs/api-key")
+            st.info("📖 Groq API Key: https://console.groq.com/keys")
+            st.info("📖 MongoDB URI: https://www.mongodb.com/docs/guides/atlas/connection-string/")
+            st.stop()
+
+        st.success("✅ Cloud mode enabled - E2B, Groq, and MongoDB configured")
+
+        # Display sandbox status and cleanup option
+        if st.session_state.e2b_sandbox is not None:
+            st.info(f"🔄 E2B Sandbox active (reusing for all operations)")
+            if st.button("🗑️ Cleanup Sandbox", help="Destroy the current E2B sandbox"):
+                try:
+                    st.session_state.e2b_sandbox.kill()
+                    st.session_state.e2b_sandbox = None
+                    st.success("✅ Sandbox cleaned up successfully")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"⚠️ Error cleaning up sandbox: {e}")
+        else:
+            st.info("💡 No active sandbox - will create one when processing video")
 
     # Input method selection
     st.markdown("---")
@@ -346,25 +406,68 @@ def main():
                 )
 
             if query:
-                # Load embedding model for search (use same device as VLM)
-                with st.spinner("Loading embedding model..."):
-                    embedding_model = load_embedding_model(device_type=selected_device_type)
+                # Check if we're in cloud mode with cloud video loaded
+                is_cloud_search = 'cloud_video_id' in st.session_state and 'cloud_mongodb_collection' in st.session_state
 
-                # Perform search
-                try:
-                    results = search_frames(query, json_filename, embedding_model, top_k)
+                if is_cloud_search:
+                    # CLOUD SEARCH WITH LLM AGENT
+                    from embeddings.cloud import search_video_frames
+                    import dotenv
+                    dotenv.load_dotenv()
 
-                    st.markdown(f"### Top {len(results)} Results for: '{query}'")
+                    collection = st.session_state['cloud_mongodb_collection']
+                    video_id = st.session_state['cloud_video_id']
+                    groq_api_key = os.getenv("GROQ_API_KEY")
 
-                    # Save video temporarily for clip extraction
-                    clips_dir = "extracted_clips"
-                    # clips_dir already created in main()
+                    with st.spinner("Searching with LLM agent..."):
+                        try:
+                            results = search_video_frames(
+                                query,
+                                groq_api_key,
+                                collection,
+                                video_id,
+                                top_k,
+                                sandbox=st.session_state.e2b_sandbox  # Pass sandbox for potential future use
+                            )
+                        except Exception as e:
+                            st.error(f"❌ Search error: {e}")
+                            import traceback
+                            st.code(traceback.format_exc())
+                            st.stop()
+                else:
+                    # LOCAL SEARCH WITH EMBEDDINGS
+                    # Load embedding model for search (use same device as VLM)
+                    with st.spinner("Loading embedding model..."):
+                        embedding_model = load_embedding_model(device_type=selected_device_type)
 
-                    # Check if we have access to video file for clip extraction
-                    video_path = None
-                    videos_dir = "videos"
-                    # videos_dir already created in main()
+                    # Perform search
+                    try:
+                        results = search_frames(query, json_filename, embedding_model, top_k)
+                    except Exception as e:
+                        st.error(f"❌ Search error: {e}")
+                        import traceback
+                        st.code(traceback.format_exc())
+                        st.stop()
 
+                st.markdown(f"### Top {len(results)} Results for: '{query}'")
+
+                # Save video temporarily for clip extraction
+                clips_dir = "extracted_clips"
+                # clips_dir already created in main()
+
+                # Check if we have access to video file for clip extraction
+                video_path = None
+                videos_dir = "videos"
+                # videos_dir already created in main()
+
+                if is_cloud_search:
+                    # For cloud mode, use stored video path
+                    if 'cloud_video_path' in st.session_state:
+                        video_path = st.session_state['cloud_video_path']
+                        if not os.path.exists(video_path):
+                            video_path = None
+                else:
+                    # For local mode, find video path
                     if video_path_from_youtube:
                         video_path = video_path_from_youtube
                     elif uploaded_file:
@@ -393,23 +496,24 @@ def main():
                                         video_path = potential_video_path
                                         break
 
-                    # Determine if we can extract clips
-                    can_extract_clips = video_path is not None and os.path.exists(video_path)
+                # Determine if we can extract clips
+                can_extract_clips = video_path is not None and os.path.exists(video_path)
 
-                    if can_extract_clips:
-                        # Get video FPS
-                        cap = cv2.VideoCapture(video_path)
-                        fps = cap.get(cv2.CAP_PROP_FPS)
-                        cap.release()
+                if can_extract_clips:
+                    # Get video FPS
+                    cap = cv2.VideoCapture(video_path)
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    cap.release()
+                else:
+                    if existing_analysis_loaded:
+                        st.warning("Video file not available in videos/ directory - showing search results without video clips")
+                        st.info("Add the matching video file to the videos/ directory to enable clip extraction")
                     else:
-                        if existing_analysis_loaded:
-                            st.warning("Video file not available in videos/ directory - showing search results without video clips")
-                            st.info("Add the matching video file to the videos/ directory to enable clip extraction")
-                        else:
-                            st.warning("Video file not available - showing search results without video clips")
-                            st.info("Upload or download the video to the videos/ directory to enable clip extraction")
+                        st.warning("Video file not available - showing search results without video clips")
+                        st.info("Upload or download the video to the videos/ directory to enable clip extraction")
 
-                    # Display results
+                # Display results
+                try:
                     for i, result in enumerate(results, 1):
                         with st.container():
                             st.markdown(f"#### Result {i}: Frame {result['frame_number']}")
@@ -417,15 +521,30 @@ def main():
                             col1, col2 = st.columns([2, 3])
 
                             with col1:
-                                st.metric("Similarity Score", f"{result['similarity']:.4f}")
+                                # Display score appropriately based on search mode
+                                if is_cloud_search:
+                                    # Try relevance_score first (from LLM re-ranking), then MongoDB score
+                                    score_value = result.get('relevance_score') or result.get('score', 0)
+                                    # Convert to float if string
+                                    if isinstance(score_value, str):
+                                        try:
+                                            score_value = float(score_value)
+                                        except:
+                                            score_value = 0.0
+                                    st.metric("Relevance Score", f"{score_value:.4f}")
+                                else:
+                                    st.metric("Similarity Score", f"{result['similarity']:.4f}")
                                 st.markdown(f"**Description:** {result['text']}")
 
                             with col2:
                                 # Get timestamp from stored data
-                                frame_timestamp = get_frame_timestamp(
-                                    result['frame_number'],
-                                    existing_data
-                                )
+                                if is_cloud_search:
+                                    frame_timestamp = result['timestamp']
+                                else:
+                                    frame_timestamp = get_frame_timestamp(
+                                        result['frame_number'],
+                                        existing_data
+                                    )
 
                                 st.markdown(f"**Timestamp:** {frame_timestamp:.2f}s")
 
@@ -566,73 +685,153 @@ def main():
                 with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
                     tmp_file.write(uploaded_file.read())
                     video_path = tmp_file.name
-            # Create output directory
-            output_dir = "video_frames_analysis"
-            os.makedirs(output_dir, exist_ok=True)
 
-            # Load models with selected device
-            device_name_display = "GPU" if selected_device_type == "cuda" else "CPU"
-            with st.spinner(f"Loading vision-language model on {device_name_display}..."):
-                model, processor, device_config = load_model(device_type=selected_device_type)
-            st.success(f"VLM loaded on {device_name_display}!")
+            if is_cloud_mode:
+                # CLOUD MODE PROCESSING
+                from embeddings.cloud import generate_video_id, setup_mongodb, process_video_cloud
+                import dotenv
+                dotenv.load_dotenv()
 
-            with st.spinner(f"Loading embedding model on {device_name_display}..."):
-                embedding_model = load_embedding_model(device_type=selected_device_type)
-            st.success(f"Embedding model loaded on {device_name_display}!")
+                st.info("☁️ Processing video in cloud using E2B + Groq...")
 
-            # Process video with performance settings and incremental saving
-            result = process_video(
-                video_path,
-                model,
-                processor,
-                embedding_model,
-                video_name=current_video_name,
-                output_dir=output_dir,
-                device_config=device_config,
-                batch_size=batch_size,
-                max_workers=max_workers,
-                save_interval=2,
-                fuse_frames=fuse_frames
-            )
+                # Setup MongoDB
+                mongodb_uri = os.getenv("MONGODB_URI")
+                mongodb_db = os.getenv("MONGODB_DATABASE", "video_search")
+                mongodb_coll = os.getenv("MONGODB_COLLECTION", "video_frames")
 
-            if result:
-                results, json_filename = result
-                st.success(f"Saved to: {json_filename}")
+                with st.spinner("Connecting to MongoDB..."):
+                    mongo_client, collection = setup_mongodb(mongodb_uri, mongodb_db, mongodb_coll)
+                st.success("✅ Connected to MongoDB Atlas")
 
-                # Display results
-                st.markdown("---")
-                st.header("Results")
+                # Generate video ID
+                video_id = generate_video_id(video_path)
+                st.info(f"Video ID: {video_id}")
 
-                # Show as table
-                for frame in results:
-                    col1, col2 = st.columns([1, 4])
-                    with col1:
-                        st.markdown(f"**Frame {frame['frame_number']}**")
-                    with col2:
-                        st.markdown(frame['text'])
+                # Check if video already processed
+                existing_count = collection.count_documents({"video_id": video_id})
+                if existing_count > 0:
+                    st.warning(f"⚠️ Video already processed ({existing_count} frames in database). Re-processing will overwrite existing data.")
 
-                # Prepare data for download button
-                output_data = {
-                    "video_name": current_video_name,
-                    "total_frames": len(results),
-                    "frames": results,
-                    "status": "complete"
-                }
-                json_str = json.dumps(output_data, indent=4)
-                st.download_button(
-                    label="Download JSON",
-                    data=json_str,
-                    file_name="video_analysis.json",
-                    mime="application/json"
+                # Progress tracking
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                def update_progress(current, total, msg):
+                    progress_bar.progress(current / total if total > 0 else 0)
+                    status_text.text(msg)
+
+                # Process video
+                try:
+                    result = process_video_cloud(
+                        video_path=video_path,
+                        video_id=video_id,
+                        groq_api_key=os.getenv("GROQ_API_KEY"),
+                        e2b_api_key=os.getenv("E2B_API_KEY"),
+                        mongodb_uri=mongodb_uri,
+                        mongodb_database=mongodb_db,
+                        mongodb_collection=mongodb_coll,
+                        progress_callback=update_progress,
+                        sandbox=st.session_state.e2b_sandbox  # Reuse existing sandbox
+                    )
+
+                    st.success(f"✅ Video processed! {result['total_frames']} frames analyzed.")
+
+                    # Store sandbox in session state for reuse
+                    if 'sandbox' in result:
+                        st.session_state.e2b_sandbox = result['sandbox']
+                        st.info("💾 Sandbox saved for reuse in future operations")
+
+                    # Store video info in session state for search
+                    st.session_state['cloud_video_id'] = video_id
+                    st.session_state['cloud_video_path'] = video_path
+                    st.session_state['cloud_mongodb_collection'] = collection
+                    st.session_state['cloud_mongo_client'] = mongo_client
+
+                    # Clean up temp file (but not YouTube downloads)
+                    if not video_path_from_youtube:
+                        # Don't delete yet - needed for clip extraction
+                        pass
+
+                    # Rerun to show search interface
+                    st.success("Processing complete! Reloading to show search interface...")
+                    st.rerun()
+
+                except Exception as e:
+                    st.error(f"❌ Error processing video: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+                    if 'mongo_client' in locals():
+                        mongo_client.close()
+                    st.stop()
+            else:
+                # LOCAL CPU MODE PROCESSING
+                # Create output directory
+                output_dir = "video_frames_analysis"
+                os.makedirs(output_dir, exist_ok=True)
+
+                # Load models with selected device
+                device_name_display = "GPU" if selected_device_type == "cuda" else "CPU"
+                with st.spinner(f"Loading vision-language model on {device_name_display}..."):
+                    model, processor, device_config = load_model(device_type=selected_device_type)
+                st.success(f"VLM loaded on {device_name_display}!")
+
+                with st.spinner(f"Loading embedding model on {device_name_display}..."):
+                    embedding_model = load_embedding_model(device_type=selected_device_type)
+                st.success(f"Embedding model loaded on {device_name_display}!")
+
+                # Process video with performance settings and incremental saving
+                result = process_video(
+                    video_path,
+                    model,
+                    processor,
+                    embedding_model,
+                    video_name=current_video_name,
+                    output_dir=output_dir,
+                    device_config=device_config,
+                    batch_size=batch_size,
+                    max_workers=max_workers,
+                    save_interval=2,
+                    fuse_frames=fuse_frames
                 )
 
-                # Clean up temp file (but not YouTube downloads)
-                if not video_path_from_youtube:
-                    os.unlink(video_path)
+                if result:
+                    results, json_filename = result
+                    st.success(f"Saved to: {json_filename}")
 
-                # Rerun to show search interface
-                st.success("Processing complete! Reloading to show search interface...")
-                st.rerun()
+                    # Display results
+                    st.markdown("---")
+                    st.header("Results")
+
+                    # Show as table
+                    for frame in results:
+                        col1, col2 = st.columns([1, 4])
+                        with col1:
+                            st.markdown(f"**Frame {frame['frame_number']}**")
+                        with col2:
+                            st.markdown(frame['text'])
+
+                    # Prepare data for download button
+                    output_data = {
+                        "video_name": current_video_name,
+                        "total_frames": len(results),
+                        "frames": results,
+                        "status": "complete"
+                    }
+                    json_str = json.dumps(output_data, indent=4)
+                    st.download_button(
+                        label="Download JSON",
+                        data=json_str,
+                        file_name="video_analysis.json",
+                        mime="application/json"
+                    )
+
+                    # Clean up temp file (but not YouTube downloads)
+                    if not video_path_from_youtube:
+                        os.unlink(video_path)
+
+                    # Rerun to show search interface
+                    st.success("Processing complete! Reloading to show search interface...")
+                    st.rerun()
     
 
 if __name__ == "__main__":
